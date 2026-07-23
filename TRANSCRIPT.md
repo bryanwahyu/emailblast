@@ -187,3 +187,21 @@ Updated both history files, then answered the O(log n) question (see the reply �
 short version: a comparison-based set can't beat O(n) space; the realistic wins
 are O(n) with a tiny constant via a bloom filter, or offloading to an external
 store).
+
+**[35]** > `how is dragonflyDB and we can use them for it`
+
+Explained DragonflyDB as the recommended external store: Redis-wire compatible
+(drop-in `SADD`/`SISMEMBER` for dedup + checkpoint), so sender RAM drops to
+`O(workers)`. Mapped both in-process maps to Dragonfly keys; contrasted with
+Redis / bloom / NATS.
+
+**[36]** > `beccause thay have multithreads`
+
+Confirmed: Dragonfly is thread-per-core shared-nothing vs Redis's single thread,
+so N workers hitting the set are served in parallel — the store never throttles,
+vertical scale with no Redis-Cluster sharding.
+
+**[37]** > `updated it and all prompt`
+
+Added DragonflyDB (+ the Ω(n)-space / no-O(log-n) note) to the README memory
+escape-hatch, and appended entries [35]–[37] to both history files.

@@ -142,8 +142,29 @@ jump above. **What streaming *does* guarantee:** the CSV rows themselves are nev
 all resident — the reader uses `ReuseRecord` (`csv.go`, one backing array reused
 per row) and copies fields out with `strings.Clone` (so a `User` never aliases the
 soon-overwritten buffer). If you need flat memory for a truly huge list, move
-dedup + resume to an external store (Redis set / bloom filter / the NATS
-JetStream design below) — the in-process maps are the single-node trade-off.
+dedup + resume to an external store — the in-process maps are the single-node
+trade-off. Options, cheapest-RAM first:
+
+- **[DragonflyDB](https://www.dragonflydb.io)** (recommended) — Redis-wire
+  compatible, so `SADD blast:seen <email>` (dedup) and `SADD/SISMEMBER blast:done
+  <id>` (checkpoint) drop in with any Redis client, no new code. Unlike Redis it's
+  **multi-threaded (thread-per-core, shared-nothing)**, so N workers hammering the
+  set are served across all cores in parallel instead of serialized behind one
+  thread — the store never becomes the throttle, and sender RAM falls to
+  `O(workers)`. Snapshotting persists the checkpoint across a store restart. One
+  container, vertical scale, no Redis-Cluster sharding.
+- **Bloom / cuckoo filter** — O(n) *bits* (~1.2 MB for 1M @ 1% FPR), ~100× smaller
+  than the map, but approximate (a false positive silently skips a real
+  recipient) — pair with an exact on-disk backstop.
+- **NATS JetStream** (see multi-node design below) — for horizontal scale, with
+  Dragonfly holding the shared seen/done sets so every node dedups against one
+  source of truth.
+
+> Note on complexity: exact dedup of *n* distinct recipients needs Ω(n) space —
+> there is no O(log n)-memory trick (that's an information-theoretic floor). The
+> realistic wins are a smaller constant (bloom filter) or moving the *n* out of
+> the sender process (Dragonfly/Redis). A sorted structure gets O(log n) *time*
+> per lookup but still O(n) space.
 
 ### Rate limiting — token bucket
 
