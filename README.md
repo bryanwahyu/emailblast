@@ -317,6 +317,19 @@ handshake is amortized over many sends instead of paid per message — the singl
 biggest SMTP throughput win. Pool defaults to `-workers`; tune with `-smtp-pool`.
 A connection that errors is dropped, never reused.
 
+> **If you use SMTP mail, respect the provider's send limit.** Every SMTP
+> service caps sends (per-second and often per-hour/day). Set `-rate` to that
+> limit — the shared rate limiter throttles all workers under it, so you won't
+> get blocked or throttled by the server:
+> ```bash
+> -backend smtp -rate 100     # provider allows 100 msg/s
+> ```
+> For a **per-second** cap this is all you need on one machine. For a **daily/
+> hourly** cap, or to spread across **multiple SMTP accounts/IPs** or **multiple
+> nodes**, put a durable queue in front (NATS JetStream — see
+> [Scale beyond one node](#scale-beyond-one-node)): it holds the backlog and each
+> consumer runs at `-rate = limit / node_count`.
+
 > **VPS deliverability reality:** a fresh VPS IP has zero reputation. Blast 1M
 > cold = instant spam-folder + blacklist. To self-host you MUST:
 > - **SPF + DKIM + DMARC** DNS records
