@@ -170,3 +170,20 @@ Committed + pushed.
 **[32]** > `updated TRANSCRIPT.md and PROMPT_HISTORY.md`
 
 Appended entries [30]–[32] to both files.
+
+**[33]** > `can check claim is true ? memory ?` … `it's weird bro 0 worker`
+
+Verified the README memory claim empirically and it was **false**. Held workers
+constant at 500 and varied recipients: 100k → 40 MB, 1M → 253 MB — memory scales
+with recipients, so it's `O(unique recipients)`, not `O(workers)`. Root cause: the
+producer dedup set (`blast.go:127`) and checkpoint set (`checkpoint.go:24`) each
+hold one entry per recipient. Corrected the README (Why Go bullet, Internals
+memory note with the measured table, benchmark note) to state the truth and
+document the external-store escape hatch. Committed + pushed.
+
+**[34]** > `update prompt_history and transcript … is there anyway for make o(log n)?`
+
+Updated both history files, then answered the O(log n) question (see the reply —
+short version: a comparison-based set can't beat O(n) space; the realistic wins
+are O(n) with a tiny constant via a bloom filter, or offloading to an external
+store).
