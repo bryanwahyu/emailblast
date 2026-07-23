@@ -1,0 +1,19 @@
+services:
+  emailblast:
+    build:
+      context: .
+      args:
+        # Set to "ses" to compile the Amazon SES backend into the image.
+        BUILD_TAGS: ""
+    image: emailblast:latest
+    # Secrets + config come from .env (git-ignored). env_file loads it into the
+    # container environment; the binary reads the same EMAIL_*/SMTP_*/AWS_* vars.
+    env_file:
+      - .env
+    volumes:
+      # Recipient list + resumable state persist on the host, so a container
+      # restart resumes from checkpoint instead of re-emailing everyone.
+      - ./data:/data
+    # Example override; most config comes from .env:
+    # command: ["-backend", "smtp", "-rate", "200", "-log-format", "json"]
+    restart: "no"

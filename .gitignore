@@ -1,0 +1,14 @@
+# secrets / local config
+.env
+
+# runtime state — never commit recipient progress or failures
+checkpoint.log
+dead-letter.log
+*.log
+
+# build output
+/emailblast
+/bin/
+
+# OS junk
+.DS_Store
