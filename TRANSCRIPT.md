@@ -4,7 +4,7 @@ This is the build log of **emailblast** — a fast, resumable, personalized bulk
 email sender in Go (bounded goroutine worker pool, rate limiting, retry, crash-safe
 checkpoint resume; mock / pooled-SMTP / SES backends). Repo:
 https://github.com/bryanwahyu/emailblast
-jus
+
 Raw, unpolished log of the prompts that drove this project, in order, verbatim
 (typos and all), each with a short note of what happened. Not cleaned up on
 purpose — this is the record, not a summary. For a tidy index see
@@ -13,6 +13,34 @@ purpose — this is the record, not a summary. For a tidy index see
 > Note: the assistant ran in a terse "caveman" output mode for this session, and
 > several prompts arrived mid-turn (while the assistant was still working). Both
 > are preserved as-is below.
+
+## How I worked with the assistant
+
+The project grew through short, iterative prompts rather than one big spec — a
+tight build-review-correct loop:
+
+- **Incremental & conversational.** Each prompt added one thing (VPS backend,
+  dry-run, logging, pooling, tests, CI…) and the assistant built, ran, and
+  verified it before moving on. Small steps, always in a working state.
+- **Mid-turn steering.** I often sent the next instruction while the assistant
+  was still working; it folded the new request into the current turn instead of
+  dropping it. Direction changed fast and it kept up.
+- **Verify, don't trust.** When a claim looked off (the `O(workers)` memory
+  claim), I asked it to prove it. It measured empirically, found the claim
+  **false**, and corrected the docs — numbers in this repo are backed by real
+  runs, not assertions.
+- **Ship continuously.** Nearly every change was committed and pushed right away,
+  so `master` always reflected the latest working state.
+- **Docs as first-class.** README, this transcript, and the history index were
+  kept in sync with the code the whole way — architecture rationale (Go, NATS,
+  Dragonfly), assumptions, safety, and benchmarks all written down as decisions
+  were made.
+- **Language & tone on demand.** Switched between English and Indonesian, terse
+  "caveman" mode, and deep-technical writing as I asked.
+
+Net: a pairing style where I set direction in small bursts and the assistant did
+the building, running, measuring, and documenting — correcting itself when the
+evidence disagreed with the story.
 
 ---
 
