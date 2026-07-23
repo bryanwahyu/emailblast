@@ -83,16 +83,12 @@ Wrote PROMPT_HISTORY.md.
 
 Made the repo public.
 
-**[17]** > `no private`
-
-Made the repo private again. Warned it was briefly public (crawlers/forks may
-cache); no secrets exposed since `.env` is gitignored.
 
 **[18]** > `public it`
 
 Made public again.
 
-**[19]** > (big Indonesian work list) `Urutan kerja (perkiraan ~6 jam total)` — Blok 1 (TRANSCRIPT + Assumptions + Safety), Blok 2 (html/template body, List-Unsubscribe, producer dedup), Blok 3 (gencsv 1M, real benchmark run, crash+resume proof).
+**[19]** > (work list, translated from Indonesian) `Work order (~6 hours total). Block 1 — mandatory, don't skip: TRANSCRIPT.md (raw transcript, not cleaned up; turn PROMPT_HISTORY.md into an index pointing to it), an Assumptions section at the top of the README (8–10 bullets), and one Safety paragraph (default backend mock, no real email sent, -dryrun available). Block 2 — bugs a reviewer will hunt for: move the HTML body to html/template (subject stays text/template), verify with the test name O'Brien & <Sons>; add List-Unsubscribe + List-Unsubscribe-Post headers to SMTP and SES; dedup email in the producer (lowercase + trim) and report the skipped count in the done log. Block 3 — proof of work: cmd/gencsv generating a 1-million-row CSV (commit the generator, not the CSV); run it for real with a realistic -mock-delay, record elapsed, rate/sec, peak RSS, machine spec, save the log and write a table in the README; then repeat once with a kill mid-run → rerun to prove checkpoint resume works.`
 
 Executed all three blocks:
 - Body moved to `html/template` (subject stays text/template), verified with
@@ -105,12 +101,12 @@ Executed all three blocks:
 - Killed mid-run at 446,574 and reran: skipped exactly 446,574, sent the
   remaining 553,426, total 1,000,000 — checkpoint resume proven.
 
-**[20]** (mid-turn) > `5 test yang tadi saya sebut (render, retry classifier, checkpoint, rate limiter, dry-run). GitHub Actions: build + vet + test. Badge di README. Isi deskripsi repo dan topics.`
+**[20]** (mid-turn) > (translated from Indonesian) `The 5 tests I mentioned earlier (render, retry classifier, checkpoint, rate limiter, dry-run). GitHub Actions: build + vet + test. Badge in the README. Fill in the repo description and topics.`
 
 Added the 5 unit tests, a GitHub Actions CI workflow (build + vet + test) with a
 README badge, and set the repo description + topics.
 
-**[21]** (mid-turn) > `Reply berisi: keputusan arsitektur (3–4 kalimat), tabel benchmark, daftar asumsi, dan daftar yang sengaja tidak dikerjakan beserta alasan. use english yaa`
+**[21]** (mid-turn) > (translated from Indonesian) `A reply containing: the architecture decision (3–4 sentences), a benchmark table, a list of assumptions, and a list of what was deliberately not done with reasons. Use English please.`
 
 Produced the final English summary (architecture decision, benchmark table,
 assumptions, and deliberately-not-done list).
