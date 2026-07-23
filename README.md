@@ -1,11 +1,47 @@
 # emailblast
 
+[![CI](https://github.com/bryanwahyu/emailblast/actions/workflows/ci.yml/badge.svg)](https://github.com/bryanwahyu/emailblast/actions/workflows/ci.yml)
+
 Fast, resumable, personalized bulk email sender in Go. Built for **1M+ recipients**
 on a single node using a bounded goroutine worker pool.
 
 The real ceiling is your **ESP sending quota**, not Go. Goroutines are cheap;
 the pool just hides network latency behind a shared rate limiter that respects
 that quota.
+
+## Safety
+
+**By default this program sends no real email.** The default backend is `mock`,
+which only logs what it would send. No message leaves the machine unless you
+explicitly pass `-backend smtp` or `-backend ses` with real credentials. Before
+any real blast, `-dryrun` wraps *any* backend to render and count against the
+real recipient list while sending nothing. The 1M benchmark below ran entirely
+on the `mock` backend — zero emails were delivered.
+
+## Assumptions
+
+- **Input** is a CSV with `id` and `email` columns; every other column is a
+  personalization merge field. `id` is stable and unique (used as the
+  idempotency / checkpoint key).
+- **Delivery is at-least-once, not exactly-once.** A crash between send and
+  checkpoint-flush can re-send a recipient; the idempotency key mitigates
+  downstream but SES/SMTP have no native dedup.
+- **The ESP sending quota is the throughput ceiling**, not Go. Worker count is
+  sized to hide latency, not to exceed the quota.
+- **Single node.** State lives in an in-process channel + a local checkpoint
+  file; there is no cross-machine coordination.
+- **Sender reputation, IP warmup, and DNS auth (SPF/DKIM/DMARC/PTR) are the
+  operator's responsibility.** This tool sends; it does not manage deliverability.
+- **`List-Unsubscribe` is required for real bulk sending** (Gmail/Yahoo rules);
+  supply `-unsub-url` and/or `-unsub-mailto`. The program warns if unset.
+- **Recipient emails may contain duplicates**; the producer dedups them
+  (trim + lowercase) within a run and reports the count.
+- **Bounce/complaint processing is out of scope** — wire SES SNS events or your
+  MTA logs to a suppression list separately.
+- **The benchmark uses a `mock` sender with simulated latency**; real-world rate
+  is bounded by your ESP, not by the numbers here.
+- **Clock/RNG-free core** where it matters: the CSV generator is deterministic so
+  runs are reproducible.
 
 ## Architecture
 
@@ -43,6 +79,8 @@ the quota. Everything above that just queues.
 | `internal/sender/smtp.go` | SMTP backend (**pooled** persistent conns) — your **VPS** / relay |
 | `internal/sender/ses.go` | Amazon SES v2 backend (build tag `ses`) |
 | `internal/sender/dryrun.go` | Wraps any backend — renders + counts, sends nothing |
+| `internal/config/dotenv.go` | Minimal `.env` loader (no dependency) |
+| `cmd/gencsv/` | Deterministic 1M-row test CSV generator |
 
 ## Quick start (zero external services)
 
@@ -130,6 +168,27 @@ Request an SES **sending quota increase** first — that quota is your throughpu
   resend after crash is detectable downstream.
 - **Graceful shutdown** — Ctrl-C / SIGTERM lets in-flight sends finish and
   flushes the checkpoint; re-run resumes cleanly.
+- **HTML-safe personalization** — the body is `html/template` (subject is
+  `text/template`), so a merge value like `O'Brien & <Sons>` is context-escaped,
+  not injected. Covered by a unit test.
+- **Email dedup** — the producer drops duplicate addresses (trim + lowercase)
+  within a run and reports the `deduped` count in the done log.
+- **List-Unsubscribe** — `-unsub-url` / `-unsub-mailto` add `List-Unsubscribe`
+  (+ `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, RFC 8058) to SMTP and
+  SES. Required by Gmail/Yahoo bulk-sender rules; the program warns if unset.
+
+## Tests
+
+```bash
+go test -race ./...
+```
+
+Five focused suites: **render** (HTML escaping of `O'Brien & <Sons>`, missing
+keys), **retry classifier** (`errors.Is` unwrapping of retryable vs permanent),
+**rate limiter** (throughput is actually throttled), **checkpoint** (resume
+reload + flush-without-close durability), and **dry-run** (inner backend never
+called). Plus dedup and List-Unsubscribe header construction. CI runs
+build + vet + test on every push.
 
 ## Logging
 
@@ -171,6 +230,8 @@ instead. Progress is logged every 2s.
 -verbose       log every send
 -smtp-host/-smtp-port/-smtp-user/-smtp-pass/-smtp-tls     SMTP backend
 -smtp-pool     persistent connection pool size (0 = match -workers)
+-unsub-url     List-Unsubscribe URL ({{email}} substituted; enables one-click)
+-unsub-mailto  List-Unsubscribe mailto address
 -log-format    text | json                                default text
 -log-level     debug | info | warn | error                default info
 -env           path to .env file                          default .env
@@ -182,6 +243,33 @@ instead. Progress is logged every 2s.
 At `-rate 500`, 1M emails ≈ **33 min**. Throughput is `min(rate, workers/latency)`
 and capped by your ESP quota — raise the quota, then raise `-rate`. Adding workers
 past `rate × latency` does nothing but queue.
+
+## Benchmark (measured)
+
+Real runs on the `mock` backend with a simulated 20ms per-send latency — **no
+real email sent**. Recipient list generated by `go run ./cmd/gencsv -n 1000000`.
+Raw evidence: [`bench/results/benchmark_raw.txt`](bench/results/benchmark_raw.txt).
+
+**Machine:** Intel Core i5-1038NG7 (4 cores / 8 threads), 16 GB RAM, macOS
+(darwin 25.5), Go 1.25.5.
+
+| Run | Recipients | Config | Elapsed | Rate | Peak RSS | Result |
+|-----|-----------:|--------|--------:|-----:|---------:|--------|
+| **1 — full** | 1,000,000 | 1000 workers, 20ms latency, rate=0 | **21.1s** | **47,287/s** | **270 MB** | sent 1,000,000 / failed 0 |
+| **2a — crash** | (killed) | 500 workers, `kill -9` mid-run | — | — | — | checkpoint at 446,574 sent |
+| **2b — resume** | remainder | same checkpoint, rerun | 23.6s | 23,424/s | 268 MB | skipped **446,574**, sent **553,426** → **1,000,000 total** |
+
+**Two things this proves:**
+
+1. **Memory is bounded by streaming, not by list size** — peak RSS stayed ~270 MB
+   for a 1M-row (45 MB) input; nothing loads the full list into RAM.
+2. **Checkpoint resume is exact** — after a hard `kill -9`, the rerun skipped
+   *precisely* the 446,574 already sent and completed the remaining 553,426.
+   446,574 + 553,426 = 1,000,000, no loss, no duplicates.
+
+> Throughput here is gated by the artificial 20ms latency and worker count, not a
+> real ESP. On a real backend, `min(rate, workers/latency)` capped by your ESP
+> quota governs — raise the quota, then `-rate`.
 
 ## Scale beyond one node
 

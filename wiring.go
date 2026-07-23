@@ -25,6 +25,7 @@ func buildSender(
 	ctx context.Context,
 	backend, from string, verbose bool, mockDelay time.Duration, mockFail int64,
 	smtpHost, smtpPort, smtpUser, smtpPass string, smtpTLS bool, smtpPool int,
+	unsub sender.Unsubscribe,
 ) (sender.Sender, error) {
 	switch backend {
 	case "mock":
@@ -33,9 +34,9 @@ func buildSender(
 		if smtpHost == "" {
 			return nil, fmt.Errorf("smtp backend needs -smtp-host")
 		}
-		return sender.NewSMTP(smtpHost, smtpPort, from, smtpUser, smtpPass, smtpTLS, smtpPool), nil
+		return sender.NewSMTP(smtpHost, smtpPort, from, smtpUser, smtpPass, smtpTLS, smtpPool, unsub), nil
 	case "ses":
-		return newSES(ctx, from)
+		return newSES(ctx, from, unsub)
 	default:
 		return nil, fmt.Errorf("unknown backend %q (want mock|smtp|ses)", backend)
 	}

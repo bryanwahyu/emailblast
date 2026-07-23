@@ -121,6 +121,9 @@ func main() {
 		smtpTLS  = flag.Bool("smtp-tls", envBool("SMTP_TLS", true), "use STARTTLS")
 		smtpPool = flag.Int("smtp-pool", envInt("SMTP_POOL", 0), "SMTP connection pool size (0 = match -workers)")
 
+		unsubURL    = flag.String("unsub-url", envStr("UNSUB_URL", ""), "List-Unsubscribe URL ({{email}} substituted); enables one-click")
+		unsubMailto = flag.String("unsub-mailto", envStr("UNSUB_MAILTO", ""), "List-Unsubscribe mailto address")
+
 		logFormat = flag.String("log-format", envStr("EMAIL_LOG_FORMAT", "text"), "log format: text | json")
 		logLevel  = flag.String("log-level", envStr("EMAIL_LOG_LEVEL", "info"), "log level: debug | info | warn | error")
 	)
@@ -154,8 +157,12 @@ func main() {
 	if poolSize <= 0 {
 		poolSize = *workers
 	}
+	unsub := sender.Unsubscribe{URL: *unsubURL, Mailto: *unsubMailto}
+	if !unsub.Enabled() && (*backend == "smtp" || *backend == "ses") {
+		logger.Warn("no unsubscribe configured; Gmail/Yahoo bulk rules require List-Unsubscribe (-unsub-url / -unsub-mailto)")
+	}
 	snd, err := buildSender(ctx, *backend, *from, *verbose, *mockDelay, *mockFail,
-		*smtpHost, *smtpPort, *smtpUser, *smtpPass, *smtpTLS, poolSize)
+		*smtpHost, *smtpPort, *smtpUser, *smtpPass, *smtpTLS, poolSize, unsub)
 	if err != nil {
 		logger.Error("backend", "err", err)
 		os.Exit(1)
@@ -214,6 +221,7 @@ func main() {
 		"elapsed", elapsed.Round(time.Millisecond).String(),
 		"sent", st.Sent.Load(),
 		"skipped", st.Skipped.Load(),
+		"deduped", st.Deduped.Load(),
 		"failed", st.Failed.Load(),
 		"retries", st.Retries.Load(),
 		"rate_per_sec", int(float64(st.Sent.Load())/elapsed.Seconds()),

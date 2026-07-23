@@ -11,6 +11,6 @@ import (
 
 // newSES is a stub unless built with `-tags ses`, keeping the default build
 // dependency-free. Rebuild with the AWS SDK to enable real SES sending.
-func newSES(_ context.Context, _ string) (sender.Sender, error) {
+func newSES(_ context.Context, _ string, _ sender.Unsubscribe) (sender.Sender, error) {
 	return nil, fmt.Errorf("ses backend not compiled in; build with: go build -tags ses .")
 }

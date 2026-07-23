@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,6 +66,7 @@ func (c *Config) applyDefaults() {
 type Stats struct {
 	Sent    atomic.Int64
 	Skipped atomic.Int64 // already done per checkpoint
+	Deduped atomic.Int64 // dropped as duplicate email within this run
 	Failed  atomic.Int64 // exhausted retries -> DLQ
 	Retries atomic.Int64
 }
@@ -116,10 +118,20 @@ func (r *Runner) Run(ctx context.Context, users <-chan model.User) error {
 	g, ctx := errgroup.WithContext(ctx)
 
 	// Producer: adapt the user stream into jobs, honoring the checkpoint so a
-	// resumed run skips already-sent IDs cheaply before they hit a worker.
+	// resumed run skips already-sent IDs cheaply, and dropping duplicate email
+	// addresses (normalized: trimmed + lowercased) so nobody is mailed twice
+	// within a run. Dedup lives in the single producer goroutine, so the set
+	// needs no lock.
 	g.Go(func() error {
 		defer close(jobs)
+		seen := make(map[string]struct{})
 		for u := range users {
+			norm := strings.ToLower(strings.TrimSpace(u.Email))
+			if _, dup := seen[norm]; dup {
+				r.stats.Deduped.Add(1)
+				continue
+			}
+			seen[norm] = struct{}{}
 			if r.cp.Has(u.ID) {
 				r.stats.Skipped.Add(1)
 				continue

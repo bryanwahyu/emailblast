@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build-vet-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build (default backend)
+        run: go build ./...
+
+      - name: Build (with SES backend)
+        run: go build -tags ses ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...

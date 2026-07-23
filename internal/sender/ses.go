@@ -31,19 +31,39 @@ import (
 type SESSender struct {
 	client *sesv2.Client
 	from   string // verified sender identity, e.g. "News <news@example.com>"
+	unsub  Unsubscribe
 }
 
 // NewSES loads AWS config from the standard chain (env, shared config, IAM role)
 // and returns a ready sender. from must be a verified SES identity.
-func NewSES(ctx context.Context, from string) (*SESSender, error) {
+func NewSES(ctx context.Context, from string, unsub Unsubscribe) (*SESSender, error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
-	return &SESSender{client: sesv2.NewFromConfig(cfg), from: from}, nil
+	return &SESSender{client: sesv2.NewFromConfig(cfg), from: from, unsub: unsub}, nil
 }
 
 func (s *SESSender) Name() string { return "ses" }
+
+// unsubHeaders maps the Unsubscribe config to SES Simple-message headers. Nil
+// when nothing is configured (SES rejects empty header values).
+func unsubHeaders(unsub Unsubscribe, recipient string) []types.MessageHeader {
+	v := unsub.Header(recipient)
+	if v == "" {
+		return nil
+	}
+	hs := []types.MessageHeader{
+		{Name: aws.String("List-Unsubscribe"), Value: aws.String(v)},
+	}
+	if unsub.OneClick() {
+		hs = append(hs, types.MessageHeader{
+			Name:  aws.String("List-Unsubscribe-Post"),
+			Value: aws.String("List-Unsubscribe=One-Click"),
+		})
+	}
+	return hs
+}
 
 func (s *SESSender) Send(ctx context.Context, u model.User, msg render.Message, key string) error {
 	_, err := s.client.SendEmail(ctx, &sesv2.SendEmailInput{
@@ -53,6 +73,7 @@ func (s *SESSender) Send(ctx context.Context, u model.User, msg render.Message, 
 			Simple: &types.Message{
 				Subject: &types.Content{Data: aws.String(msg.Subject)},
 				Body:    &types.Body{Html: &types.Content{Data: aws.String(msg.Body)}},
+				Headers: unsubHeaders(s.unsub, u.Email),
 			},
 		},
 		// Dedupe key: SES does not natively dedupe, but propagating it as a tag

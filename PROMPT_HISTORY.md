@@ -1,29 +1,34 @@
-# Prompt History
+# Prompt History (index)
 
-Chronological record of the prompts that drove this project, and what each
-produced. Session date: 2026-07-23.
+Tidy index into the raw log in **[TRANSCRIPT.md](TRANSCRIPT.md)**. Each row links
+to the corresponding raw entry. Session date: 2026-07-23.
 
-| # | Prompt | Outcome |
-|---|--------|---------|
-| 1 | *Design the fastest architecture for sending 1 million personalized emails — which is good for me?* | Recommended fan-out queue + worker pool + ESP bulk API. Compared SES / SendGrid / Kafka. Picked **SES + SQS + worker pool** (cheapest, scalable). Listed deliverability must-haves. |
-| 2 | *Can we go because we can use goroutines and concurrency?* | Confirmed Go fits (I/O-bound, cheap goroutines). Sketched worker pool + `rate.Limiter` + `errgroup`. Established ESP quota is the real ceiling, not Go. |
-| 3 | *Build the full Go program.* | Built the full project: streaming CSV source, parse-once templates, worker pool, rate limiter, retry+backoff, checkpoint, DLQ, mock/SES backends. Verified builds + live runs. |
-| 4 | *README please.* | Added `README.md` with architecture diagram, components, usage. |
-| 5 | *If the other side uses a VPS, how?* | Added **SMTP backend** (stdlib, no deps) for self-hosted VPS mail servers / relays. Documented SPF/DKIM/DMARC/PTR/IP-warmup reality. |
-| 6 | *Don't forget dry-run code.* | Added `-dryrun` — wraps any backend, renders + counts, sends nothing. Safe pre-blast validation. |
-| 7 | *Worker pool and buffered channel already added?* | Confirmed with `blast.go` line refs; explained backpressure + fixed-N design. |
-| 8 | *Create git, also docker and .env.* | Added `.env` loader + `.env.example`, `.gitignore`, `.dockerignore`, `Dockerfile` (multi-stage, SES via build arg), `docker-compose.yml`. Env-backed flag defaults. |
-| 9 | *How logging?* | Migrated to structured `log/slog` with `-log-format text\|json` + `-log-level`. Bridged stdlib `log` through the same handler. |
-| 10 | *Review as senior backend.* | Self-review. Fixed: checkpoint durability (periodic flush), reinvented `errors.Is` → stdlib, CSV double-copy → `strings.Clone`, `-env=x` parsing. Documented remaining limits. |
-| 11 | *Do issue first.* → *fix top remaining limit* | Fixed the top throughput limit: **SMTP connection pooling** — persistent pooled connections + `RSET` reuse, amortizing the TCP+TLS+AUTH handshake. Tunable `-smtp-pool`. |
-| 12 | *Update all docs.* | Updated `README.md` (pooling, logging section, flags) + `.env.example` (`SMTP_POOL`). |
-| 13–15 | *Commit, then push. Write prompt history to md.* | Committed each stage; created remote + pushed; wrote this file. |
+| # | Prompt (short) | Outcome | Raw |
+|---|----------------|---------|-----|
+| 1 | Fastest architecture for 1M personalized emails? | Recommended worker pool + rate limiter + ESP; SES + SQS pick | [T1](TRANSCRIPT.md) |
+| 2 | Can we use Go goroutines/concurrency? | Confirmed; ESP quota is the ceiling, not Go | [T2](TRANSCRIPT.md) |
+| 3 | Build the full Go program | Full pipeline: streaming source, pool, retry, checkpoint, DLQ | [T3](TRANSCRIPT.md) |
+| 4 | README | Architecture + usage docs | [T4](TRANSCRIPT.md) |
+| 5 | VPS? | SMTP backend + deliverability guide | [T5](TRANSCRIPT.md) |
+| 6 | Dry-run | `-dryrun` wraps any backend | [T6](TRANSCRIPT.md) |
+| 7 | Pool/buffered channel added? | Confirmed with file:line | [T7](TRANSCRIPT.md) |
+| 8 | git + docker + .env | Repo, Dockerfile, compose, `.env` loader | [T8](TRANSCRIPT.md) |
+| 9 | Logging? | Structured `slog`, text/json | [T9](TRANSCRIPT.md) |
+| 10 | Senior review | Fixed 4 issues | [T10](TRANSCRIPT.md) |
+| 11 | Fix top limit | SMTP connection pooling | [T11](TRANSCRIPT.md) |
+| 12 | Update docs | README + `.env.example` | [T12](TRANSCRIPT.md) |
+| 13–14 | Commit + push | Created + pushed repo | [T13](TRANSCRIPT.md) |
+| 15 | Prompt history to md | This file | [T15](TRANSCRIPT.md) |
+| 16–18 | Public / private toggles | Visibility changes | [T16](TRANSCRIPT.md) |
+| 19 | 3-block work list (ID) | html/template, List-Unsubscribe, dedup, gencsv, 1M benchmark, crash+resume | [T19](TRANSCRIPT.md) |
+| 20 | 5 tests + CI + repo meta | Unit tests, GitHub Actions, badge, description/topics | [T20](TRANSCRIPT.md) |
+| 21 | Final English summary | Decision + benchmark + assumptions + not-done | [T21](TRANSCRIPT.md) |
 
 ## Architecture decisions captured
 
 - **ESP quota, not Go, is the throughput ceiling.** Fixed worker count ≈
   `quota × latency`; more goroutines just queue.
-- **Streaming everywhere** — 1M rows never held in RAM.
+- **Streaming everywhere** — 1M rows never held in RAM (measured peak RSS ~270MB).
 - **At-least-once delivery.** Idempotency key + resumable checkpoint; true
   exactly-once needs provider-side dedup (out of scope).
 - **Pluggable `Sender`** — mock / SMTP (pooled) / SES, swappable without touching
@@ -31,4 +36,4 @@ produced. Session date: 2026-07-23.
 - **Single node by design.** Multi-node durability = swap the in-process channel
   for SQS/Kafka; pipeline logic ports unchanged.
 
-See `README.md` for full usage.
+See [TRANSCRIPT.md](TRANSCRIPT.md) for the raw log and [README.md](README.md) for usage.
