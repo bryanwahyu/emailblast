@@ -53,8 +53,8 @@ Go is the right tool for this: **robust and fast** for high-concurrency I/O work
   instead of burning CPU.
 - **Channels give backpressure for free** — the buffered jobs channel bounds
   in-flight work without any external broker; the producer blocks when workers
-  fall behind. CSV *rows* are streamed, never all held at once (measured ~253 MB
-  peak at 1M — see the memory note below for what does scale with list size).
+  fall behind. CSV *rows* are streamed, never all held at once (~250 MB peak at 1M
+  — see the memory note below for what does scale with list size).
 - **Robust by construction** — static typing, `errgroup` for clean lifecycle +
   error propagation, `context` for graceful cancellation, and a single static
   binary (CGO off) that drops into any Alpine container with no runtime deps.
@@ -128,17 +128,20 @@ design. Two correctness structures hold one entry per recipient:
 - the checkpoint's completed set (`done map[string]struct{}`, `checkpoint.go:24`)
   — one key per sent ID, so a rerun can resume.
 
-Measured (mock, 500 workers held constant):
+Measured — **500 workers held constant**, only recipient count varied (mock, 1ms
+latency, rate=0, fresh checkpoint):
 
 | Recipients | Peak RSS |
 |-----------:|---------:|
 | 100,000 | 40 MB |
-| 1,000,000 | 253 MB |
+| 500,000 | 140 MB |
+| 1,000,000 | 252 MB |
 
-Workers were identical in both runs, yet RSS grew ~6× — proof the growth is the
-two per-recipient maps, not the pool. Rough cost: a `map[string]struct{}` of 1M
-short keys is ~100–150 MB (Go map overhead + the key strings), consistent with the
-jump above. **What streaming *does* guarantee:** the CSV rows themselves are never
+Workers were identical across all three, yet RSS grew ~6× — proof the growth is
+the two per-recipient maps, not the pool. Rough cost: a `map[string]struct{}` of
+1M short keys is ~100–150 MB (Go map overhead + the key strings), consistent with
+the jump above. (Peak RSS is noisy — Go heap + GC timing give ±~10% run-to-run —
+so treat these as approximate; the *scaling trend* is the point, not the exact MB.) **What streaming *does* guarantee:** the CSV rows themselves are never
 all resident — the reader uses `ReuseRecord` (`csv.go`, one backing array reused
 per row) and copies fields out with `strings.Clone` (so a `User` never aliases the
 soon-overwritten buffer). If you need flat memory for a truly huge list, move
@@ -433,18 +436,22 @@ Raw evidence: [`bench/results/benchmark_raw.txt`](bench/results/benchmark_raw.tx
 **Machine:** Intel Core i5-1038NG7 (4 cores / 8 threads), 16 GB RAM, macOS
 (darwin 25.5), Go 1.25.5.
 
-| Run | Recipients | Config | Elapsed | Rate | Peak RSS | Result |
+| Run | Recipients | Config | Elapsed | Rate | Peak RSS¹ | Result |
 |-----|-----------:|--------|--------:|-----:|---------:|--------|
-| **1 — full** | 1,000,000 | 1000 workers, 20ms latency, rate=0 | **21.1s** | **47,287/s** | **270 MB** | sent 1,000,000 / failed 0 |
+| **1 — full** | 1,000,000 | 1000 workers, 20ms latency, rate=0 | **21.0s** | **47,711/s** | ~259 MB | sent 1,000,000 / failed 0 |
 | **2a — crash** | (killed) | 500 workers, `kill -9` mid-run | — | — | — | checkpoint at 446,574 sent |
-| **2b — resume** | remainder | same checkpoint, rerun | 23.6s | 23,424/s | 268 MB | skipped **446,574**, sent **553,426** → **1,000,000 total** |
+| **2b — resume** | remainder | same checkpoint, rerun | 23.6s | 23,424/s | ~250 MB | skipped **446,574**, sent **553,426** → **1,000,000 total** |
+
+¹ Peak RSS is noisy (Go heap + GC timing, ±~10% run-to-run) — approximate. For the
+controlled memory-scaling numbers see the [memory note](#backpressure--memory) in
+Internals. Elapsed/rate are stable.
 
 **Two things this proves:**
 
 1. **The full CSV is never loaded into RAM** — rows are streamed; peak RSS was
-   ~270 MB for a 1M-row (45 MB) input. Note that memory still scales with *unique
-   recipients* (the dedup + checkpoint indexes are O(n) — see the memory note in
-   Internals), not with the raw file size.
+   ~250–270 MB for a 1M-row (45 MB) input. Note that memory still scales with
+   *unique recipients* (the dedup + checkpoint indexes are O(n) — see the memory
+   note in Internals), not with the raw file size.
 2. **Checkpoint resume is exact** — after a hard `kill -9`, the rerun skipped
    *precisely* the 446,574 already sent and completed the remaining 553,426.
    446,574 + 553,426 = 1,000,000, no loss, no duplicates.
