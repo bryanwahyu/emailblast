@@ -1,17 +1,25 @@
-# Raw benchmark evidence — 2026-07-23T10:01:26Z
+# Benchmark evidence — 2026-07-23T11:03:16Z
+# All runs: mock backend (no real email sent). RSS via /usr/bin/time -l.
+# NOTE: peak RSS is noisy (Go heap + GC timing), ~±10% run-to-run. Treat as approximate.
+
 ## Machine
 CPU: Intel(R) Core(TM) i5-1038NG7 CPU @ 2.00GHz (8 threads)
-RAM: 16 GB
-OS: darwin 25.5.0; Go go1.25.5
+RAM: 16 GB; OS darwin 25.5.0; go1.25.5
 
-## RUN 1 — full 1M (mock 20ms latency, 1000 workers, rate=0)
-{"time":"2026-07-23T16:59:39.759307+07:00","level":"INFO","msg":"done","elapsed":"21.147s","sent":1000000,"skipped":0,"deduped":0,"failed":0,"retries":0,"rate_per_sec":47287}
-peak RSS: 270 MB
+## Headline throughput — full 1M, 1000 workers, 20ms mock latency, rate=0
+  done: elapsed=20.959s sent=1,000,000 failed=0 rate=47,711/s
+  peak RSS: 258.7 MB (271286272 bytes)
+  (an earlier identical-config run measured 270.0 MB — RSS is noisy, see NOTE above)
 
-## RUN 2a — crash: SIGKILL mid-run
-checkpoint at crash: 446574 lines (no clean done)
+## Memory scaling — FIXED config (500 workers, 1ms latency, rate=0, fresh checkpoint)
+  This is the authoritative O(n) evidence: workers held constant, recipients varied.
+  100,000   -> 40.4 MB
+  500,000   -> 139.8 MB
+  1,000,000 -> 251.8 MB
+  => memory scales with recipients (dedup set blast.go:127 + checkpoint set checkpoint.go:24), O(n).
 
-## RUN 2b — resume (same checkpoint)
-{"time":"2026-07-23T17:01:06.103059+07:00","level":"INFO","msg":"done","elapsed":"23.626s","sent":553426,"skipped":446574,"deduped":0,"failed":0,"retries":0,"rate_per_sec":23424}
-peak RSS: 268 MB
-final checkpoint total:  1000000 lines
+## Crash + resume proof (exact counts, deterministic — not RSS-dependent)
+  crashed (kill -9) at: 446,574 sent
+  resume run skipped:   446,574 (exactly the crashed count)
+  resume run sent:      553,426
+  446,574 + 553,426 =   1,000,000 total, no loss, no duplicates

@@ -39,6 +39,8 @@ to the corresponding raw entry. Session date: 2026-07-23.
 | 35 | DragonflyDB for it? | Recommended external store, Redis-compatible | [T35](TRANSCRIPT.md) |
 | 36 | Because multithreads | Thread-per-core vs Redis single thread | [T36](TRANSCRIPT.md) |
 | 37 | Update README + history | Dragonfly in escape-hatch + entries 35–37 | [T37](TRANSCRIPT.md) |
+| 38 | Reconcile 253 vs 270 MB | Config-labelled RSS, noise flagged, clean scaling table | [T38](TRANSCRIPT.md) |
+| 39 | SMTP limit → use queue? | Rate limiter + NATS/Watermill queue answer | [T39](TRANSCRIPT.md) |
 
 ## Architecture decisions captured
 

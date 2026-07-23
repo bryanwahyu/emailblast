@@ -1,5 +1,10 @@
 # TRANSCRIPT (raw)
 
+This is the build log of **emailblast** — a fast, resumable, personalized bulk
+email sender in Go (bounded goroutine worker pool, rate limiting, retry, crash-safe
+checkpoint resume; mock / pooled-SMTP / SES backends). Repo:
+https://github.com/bryanwahyu/emailblast
+
 Raw, unpolished log of the prompts that drove this project, in order, verbatim
 (typos and all), each with a short note of what happened. Not cleaned up on
 purpose — this is the record, not a summary. For a tidy index see
@@ -205,3 +210,20 @@ vertical scale with no Redis-Cluster sharding.
 
 Added DragonflyDB (+ the Ω(n)-space / no-O(log-n) note) to the README memory
 escape-hatch, and appended entries [35]–[37] to both history files.
+
+**[38]** > `need to check 253 vs 270 MB make them are real data` … `and added for transcripts first paragraf`
+
+Reconciled the conflicting RSS numbers. Root cause: they came from different
+configs (270 MB = 1000 workers/20ms headline; 253 MB = 500 workers/1ms scaling
+test) AND peak RSS is noisy (a fresh identical-config run gave 258.7 MB — Go
+heap/GC ±~10%). Re-measured a clean fixed-config scaling table (500 workers:
+100k=40 MB, 500k=140 MB, 1M=252 MB), rewrote `bench/results/benchmark_raw.txt`,
+and updated every README RSS mention to be config-labelled + flagged approximate.
+Also added a project-summary sentence to this file's first paragraph.
+
+**[39]** > `if i use SMTP there 've limit so can we use queue for this one ?`
+
+Answered: yes — the shared rate limiter already respects an SMTP send limit
+(`-rate`), and for durability / multi-node the queue (NATS JetStream, optionally
+via Watermill) is the right add. Explained per-provider throttling and the queue
+design (see reply).
