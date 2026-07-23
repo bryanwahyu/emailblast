@@ -23,6 +23,14 @@ to the corresponding raw entry. Session date: 2026-07-23.
 | 19 | 3-block work list (ID) | html/template, List-Unsubscribe, dedup, gencsv, 1M benchmark, crash+resume | [T19](TRANSCRIPT.md) |
 | 20 | 5 tests + CI + repo meta | Unit tests, GitHub Actions, badge, description/topics | [T20](TRANSCRIPT.md) |
 | 21 | Final English summary | Decision + benchmark + assumptions + not-done | [T21](TRANSCRIPT.md) |
+| 22 | Translate TRANSCRIPT to English | Indonesian prompts translated | [T22](TRANSCRIPT.md) |
+| 23 | Is good? | Health check: build/vet/test/CI green | [T23](TRANSCRIPT.md) |
+| 24 | Push | Already up to date | [T24](TRANSCRIPT.md) |
+| 25 | Verify README | Fixed body text→html/template | [T25](TRANSCRIPT.md) |
+| 26 | Why Go + NATS multi-node | Why Go section + NATS JetStream | [T26](TRANSCRIPT.md) |
+| 27 | Make it deep technical | Internals deep-dive section | [T27](TRANSCRIPT.md) |
+| 28 | Verify links + code refs | Fixed errgroup ref 112→118 | [T28](TRANSCRIPT.md) |
+| 29 | Update history files | Appended [22]–[29] to both | [T29](TRANSCRIPT.md) |
 
 ## Architecture decisions captured
 
