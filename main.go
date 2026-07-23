@@ -119,6 +119,7 @@ func main() {
 		smtpUser = flag.String("smtp-user", envStr("SMTP_USER", ""), "SMTP username (empty = no auth)")
 		smtpPass = flag.String("smtp-pass", envStr("SMTP_PASS", ""), "SMTP password")
 		smtpTLS  = flag.Bool("smtp-tls", envBool("SMTP_TLS", true), "use STARTTLS")
+		smtpPool = flag.Int("smtp-pool", envInt("SMTP_POOL", 0), "SMTP connection pool size (0 = match -workers)")
 
 		logFormat = flag.String("log-format", envStr("EMAIL_LOG_FORMAT", "text"), "log format: text | json")
 		logLevel  = flag.String("log-level", envStr("EMAIL_LOG_LEVEL", "info"), "log level: debug | info | warn | error")
@@ -147,8 +148,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Default the SMTP pool to the worker count so every worker can hold a
+	// warm connection instead of contending.
+	poolSize := *smtpPool
+	if poolSize <= 0 {
+		poolSize = *workers
+	}
 	snd, err := buildSender(ctx, *backend, *from, *verbose, *mockDelay, *mockFail,
-		*smtpHost, *smtpPort, *smtpUser, *smtpPass, *smtpTLS)
+		*smtpHost, *smtpPort, *smtpUser, *smtpPass, *smtpTLS, poolSize)
 	if err != nil {
 		logger.Error("backend", "err", err)
 		os.Exit(1)

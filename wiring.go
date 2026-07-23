@@ -24,7 +24,7 @@ func sourceStream(path string, out chan<- model.User) <-chan error {
 func buildSender(
 	ctx context.Context,
 	backend, from string, verbose bool, mockDelay time.Duration, mockFail int64,
-	smtpHost, smtpPort, smtpUser, smtpPass string, smtpTLS bool,
+	smtpHost, smtpPort, smtpUser, smtpPass string, smtpTLS bool, smtpPool int,
 ) (sender.Sender, error) {
 	switch backend {
 	case "mock":
@@ -33,7 +33,7 @@ func buildSender(
 		if smtpHost == "" {
 			return nil, fmt.Errorf("smtp backend needs -smtp-host")
 		}
-		return sender.NewSMTP(smtpHost, smtpPort, from, smtpUser, smtpPass, smtpTLS), nil
+		return sender.NewSMTP(smtpHost, smtpPort, from, smtpUser, smtpPass, smtpTLS, smtpPool), nil
 	case "ses":
 		return newSES(ctx, from)
 	default:
