@@ -40,7 +40,7 @@ the quota. Everything above that just queues.
 | `internal/blast/blast.go` | Worker pool, rate limiter, retry/backoff, DLQ |
 | `internal/checkpoint/checkpoint.go` | Resumable progress log (crash-safe) |
 | `internal/sender/sender.go` | `Sender` interface + `mock` backend (default) |
-| `internal/sender/smtp.go` | SMTP backend — your **VPS** mail server / relay |
+| `internal/sender/smtp.go` | SMTP backend (**pooled** persistent conns) — your **VPS** / relay |
 | `internal/sender/ses.go` | Amazon SES v2 backend (build tag `ses`) |
 | `internal/sender/dryrun.go` | Wraps any backend — renders + counts, sends nothing |
 
@@ -90,6 +90,12 @@ go run . -in users.csv -backend smtp -smtp-host localhost -smtp-port 25 \
   -smtp-tls=false -from news@you.com -rate 100
 ```
 
+**Connection pooling:** the SMTP backend keeps a bounded pool of persistent
+connections and issues `RSET` between messages, so one TCP+STARTTLS+AUTH
+handshake is amortized over many sends instead of paid per message — the single
+biggest SMTP throughput win. Pool defaults to `-workers`; tune with `-smtp-pool`.
+A connection that errors is dropped, never reused.
+
 > **VPS deliverability reality:** a fresh VPS IP has zero reputation. Blast 1M
 > cold = instant spam-folder + blacklist. To self-host you MUST:
 > - **SPF + DKIM + DMARC** DNS records
@@ -125,6 +131,29 @@ Request an SES **sending quota increase** first — that quota is your throughpu
 - **Graceful shutdown** — Ctrl-C / SIGTERM lets in-flight sends finish and
   flushes the checkpoint; re-run resumes cleanly.
 
+## Logging
+
+Structured logging via the stdlib `log/slog`. Two formats:
+
+```bash
+-log-format text   # human-friendly, default — key=value
+-log-format json   # machine-parseable for Loki / CloudWatch / ELK aggregation
+-log-level info    # debug | info | warn | error
+```
+
+`json` example (one object per line):
+
+```json
+{"time":"2026-07-23T16:35:21Z","level":"INFO","msg":"progress","sent":420000,"skipped":0,"failed":12,"retries":37}
+{"time":"2026-07-23T16:35:21Z","level":"INFO","msg":"done","elapsed":"33m","sent":999988,"failed":12,"rate_per_sec":505}
+```
+
+The stdlib `log.Printf` calls inside the internal packages are bridged through
+the same slog handler, so every line — operational events and incidental
+warnings alike — shares one format and one stream (stderr). Per-recipient
+failures are not logged individually at scale; they land in the dead-letter file
+instead. Progress is logged every 2s.
+
 ## Flags
 
 ```
@@ -141,6 +170,10 @@ Request an SES **sending quota increase** first — that quota is your throughpu
 -body          HTML body template
 -verbose       log every send
 -smtp-host/-smtp-port/-smtp-user/-smtp-pass/-smtp-tls     SMTP backend
+-smtp-pool     persistent connection pool size (0 = match -workers)
+-log-format    text | json                                default text
+-log-level     debug | info | warn | error                default info
+-env           path to .env file                          default .env
 -mock-delay/-mock-fail-every                              mock tuning
 ```
 

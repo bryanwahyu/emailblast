@@ -24,78 +24,138 @@ import (
 // usually the pragmatic choice; a self-run VPS relay makes sense when you own
 // deliverability end-to-end. This backend lets you do either.
 //
-// A new smtp.Client is opened per Send for simplicity and isolation. For max
-// throughput swap in a pooled/persistent-connection dialer, but per-connection
-// send keeps one slow/broken connection from poisoning others, and the worker
-// pool already provides the concurrency.
+// Connection pooling: a TCP + STARTTLS + AUTH handshake per message is the
+// dominant cost on the SMTP path. This sender keeps a bounded pool of persistent
+// smtp.Client connections and issues RSET between messages to reuse them, so one
+// handshake is amortized over many sends. A connection that errors is discarded
+// (never returned to the pool) so one broken link can't poison the others.
 type SMTPSender struct {
 	host string // "mail.example.com"
 	port string // "587" (STARTTLS) or "25"
 	from string // envelope + header From
 	auth smtp.Auth
 	tls  bool // use STARTTLS
+
+	pool chan *smtp.Client // idle, ready-to-reuse connections
 }
 
-// NewSMTP builds an SMTP backend. Pass user/pass "" for an unauthenticated
-// local relay (common when the app runs ON the same VPS as Postfix on :25).
-func NewSMTP(host, port, from, user, pass string, useTLS bool) *SMTPSender {
+// NewSMTP builds an SMTP backend with a connection pool of the given size.
+// poolSize <= 0 defaults to 1. Pass user/pass "" for an unauthenticated local
+// relay (common when the app runs ON the same VPS as Postfix on :25).
+//
+// Size the pool to roughly the number of concurrent workers hitting SMTP; extra
+// connections beyond that just sit idle.
+func NewSMTP(host, port, from, user, pass string, useTLS bool, poolSize int) *SMTPSender {
 	var auth smtp.Auth
 	if user != "" {
 		auth = smtp.PlainAuth("", user, pass, host)
 	}
-	return &SMTPSender{host: host, port: port, from: from, auth: auth, tls: useTLS}
+	if poolSize <= 0 {
+		poolSize = 1
+	}
+	return &SMTPSender{
+		host: host, port: port, from: from, auth: auth, tls: useTLS,
+		pool: make(chan *smtp.Client, poolSize),
+	}
 }
 
 func (s *SMTPSender) Name() string { return "smtp" }
 
-func (s *SMTPSender) Send(ctx context.Context, u model.User, msg render.Message, key string) error {
-	addr := net.JoinHostPort(s.host, s.port)
+// getConn returns a pooled connection if one is idle, otherwise dials a fresh
+// one and completes the STARTTLS + AUTH handshake.
+func (s *SMTPSender) getConn(ctx context.Context) (*smtp.Client, error) {
+	select {
+	case c := <-s.pool:
+		return c, nil // reuse: handshake already done
+	default:
+	}
+	return s.dial(ctx)
+}
 
+// putConn returns a healthy connection to the pool, or closes it if the pool is
+// full. The caller must have already RSET the transaction.
+func (s *SMTPSender) putConn(c *smtp.Client) {
+	select {
+	case s.pool <- c:
+	default:
+		c.Close() // pool full: drop the extra
+	}
+}
+
+func (s *SMTPSender) dial(ctx context.Context) (*smtp.Client, error) {
+	addr := net.JoinHostPort(s.host, s.port)
 	d := net.Dialer{Timeout: 10 * time.Second}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("%w: dial %s: %v", ErrRetryable, addr, err) // network -> retryable
+		return nil, fmt.Errorf("%w: dial %s: %v", ErrRetryable, addr, err)
 	}
-	defer conn.Close()
-
 	c, err := smtp.NewClient(conn, s.host)
 	if err != nil {
-		return fmt.Errorf("%w: smtp client: %v", ErrRetryable, err)
+		conn.Close()
+		return nil, fmt.Errorf("%w: smtp client: %v", ErrRetryable, err)
 	}
-	defer c.Close()
-
 	if s.tls {
 		if err := c.StartTLS(&tls.Config{ServerName: s.host}); err != nil {
-			return fmt.Errorf("%w: starttls: %v", ErrRetryable, err)
+			c.Close()
+			return nil, fmt.Errorf("%w: starttls: %v", ErrRetryable, err)
 		}
 	}
 	if s.auth != nil {
 		if err := c.Auth(s.auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err) // permanent
+			c.Close()
+			return nil, fmt.Errorf("smtp auth: %w", err) // permanent
 		}
 	}
+	return c, nil
+}
+
+func (s *SMTPSender) Send(ctx context.Context, u model.User, msg render.Message, key string) error {
+	c, err := s.getConn(ctx)
+	if err != nil {
+		return err // already wrapped (retryable dial / permanent auth)
+	}
+
+	// On any protocol error the connection state is undefined -> close & drop,
+	// never return it to the pool. errRetryable classification below drives the
+	// worker's retry loop, which will dial a fresh connection.
+	if err := s.deliver(c, u, msg, key); err != nil {
+		c.Close()
+		return err
+	}
+
+	// Reset transaction so the next message can reuse this connection.
+	if err := c.Reset(); err != nil {
+		c.Close()
+		return nil // send already succeeded; just don't reuse this conn
+	}
+	s.putConn(c)
+	return nil
+}
+
+// deliver runs one MAIL/RCPT/DATA transaction on an established connection.
+func (s *SMTPSender) deliver(c *smtp.Client, u model.User, msg render.Message, key string) error {
 	if err := c.Mail(s.from); err != nil {
 		return fmt.Errorf("%w: MAIL FROM: %v", ErrRetryable, err)
 	}
 	if err := c.Rcpt(u.Email); err != nil {
-		// 5xx here usually means bad recipient -> permanent; 4xx -> retryable.
+		// 4xx -> transient (greylisting, rate) -> retryable; 5xx -> bad address.
 		if strings.HasPrefix(strings.TrimSpace(err.Error()), "4") {
 			return fmt.Errorf("%w: RCPT: %v", ErrRetryable, err)
 		}
 		return fmt.Errorf("RCPT %s: %w", u.Email, err)
 	}
-
 	wc, err := c.Data()
 	if err != nil {
 		return fmt.Errorf("%w: DATA: %v", ErrRetryable, err)
 	}
 	if _, err := wc.Write(buildMIME(s.from, u.Email, key, msg)); err != nil {
+		wc.Close()
 		return fmt.Errorf("%w: write body: %v", ErrRetryable, err)
 	}
 	if err := wc.Close(); err != nil {
 		return fmt.Errorf("%w: close data: %v", ErrRetryable, err)
 	}
-	return c.Quit()
+	return nil
 }
 
 // buildMIME assembles a minimal RFC 5322 HTML message. Message-ID carries the
