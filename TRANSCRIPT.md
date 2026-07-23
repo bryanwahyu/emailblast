@@ -153,3 +153,20 @@ one: errgroup was cited at `blast.go:112` (that line is the limiter) → fixed t
 **[29]** > `updated PROMPT_HISTORY.md / TRANSCRIPT.md`
 
 Appended entries [22]–[29] to both this file and the PROMPT_HISTORY.md index.
+
+**[30]** > `why i choose Nats because easy aand faster it's can combine with watermill`
+
+Added the NATS rationale to the README (easy — single binary, no ZooKeeper; faster
+— millions msg/s, tiny footprint) and documented combining it with **Watermill**
+(broker-agnostic Publisher/Subscriber + retry/poison-queue middleware mapping onto
+our retry + DLQ). Committed + pushed.
+
+**[31]** > `also for last SQS it's need Cost and kafka is eat RAM`
+
+Added a broker trade-off table: NATS (chosen) vs **SQS** (pay-per-request cost at
+1M+ msgs, AWS lock-in) vs **Kafka** (RAM/ops heavy — JVM + ZooKeeper/KRaft).
+Committed + pushed.
+
+**[32]** > `updated TRANSCRIPT.md and PROMPT_HISTORY.md`
+
+Appended entries [30]–[32] to both files.

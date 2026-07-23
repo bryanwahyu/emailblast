@@ -31,6 +31,9 @@ to the corresponding raw entry. Session date: 2026-07-23.
 | 27 | Make it deep technical | Internals deep-dive section | [T27](TRANSCRIPT.md) |
 | 28 | Verify links + code refs | Fixed errgroup ref 112→118 | [T28](TRANSCRIPT.md) |
 | 29 | Update history files | Appended [22]–[29] to both | [T29](TRANSCRIPT.md) |
+| 30 | Why NATS + Watermill | NATS rationale + Watermill integration | [T30](TRANSCRIPT.md) |
+| 31 | SQS cost, Kafka RAM | Broker trade-off table | [T31](TRANSCRIPT.md) |
+| 32 | Update history files | Appended [30]–[32] to both | [T32](TRANSCRIPT.md) |
 
 ## Architecture decisions captured
 
