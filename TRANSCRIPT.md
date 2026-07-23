@@ -16,31 +16,28 @@ purpose — this is the record, not a summary. For a tidy index see
 
 ## How I worked with the assistant
 
-The project grew through short, iterative prompts rather than one big spec — a
-tight build-review-correct loop:
+I use an assistant to move faster through decisions, not to be handed them. The
+pattern below is consistent: establish the real bottleneck first, ask for options
+rather than a solution, choose one, then verify the result myself instead of
+trusting it. A few places in this log where that shows:
 
-- **Incremental & conversational.** Each prompt added one thing (VPS backend,
-  dry-run, logging, pooling, tests, CI…) and the assistant built, ran, and
-  verified it before moving on. Small steps, always in a working state.
-- **Mid-turn steering.** I often sent the next instruction while the assistant
-  was still working; it folded the new request into the current turn instead of
-  dropping it. Direction changed fast and it kept up.
-- **Verify, don't trust.** When a claim looked off (the `O(workers)` memory
-  claim), I asked it to prove it. It measured empirically, found the claim
-  **false**, and corrected the docs — numbers in this repo are backed by real
-  runs, not assertions.
-- **Ship continuously.** Nearly every change was committed and pushed right away,
-  so `master` always reflected the latest working state.
-- **Docs as first-class.** README, this transcript, and the history index were
-  kept in sync with the code the whole way — architecture rationale (Go, NATS,
-  Dragonfly), assumptions, safety, and benchmarks all written down as decisions
-  were made.
-- **Language & tone on demand.** Switched between English and Indonesian, terse
-  "caveman" mode, and deep-technical writing as I asked.
-
-Net: a pairing style where I set direction in small bursts and the assistant did
-the building, running, measuring, and documenting — correcting itself when the
-evidence disagreed with the story.
+- **[1]–[2]** — I opened by asking which architecture fit my constraints, not for
+  code. The finding that the ESP quota, not Go, is the throughput ceiling came out
+  of that exchange and shaped every decision after it.
+- **[5]–[6]** — I raised the case where the customer runs their own VPS, and asked
+  for a dry run, before either was suggested to me. Both come from having shipped
+  systems that send mail.
+- **[7]** — I stopped to check a claim about the worker pool against the actual
+  code rather than take it as read.
+- **[10], [28]** — I ordered the adversarial self-review and the reference audit.
+  Those findings were not volunteered; I went looking for them.
+- **[30]–[31]** — The recommendation was SQS or Kafka. I chose NATS JetStream
+  instead: SQS bills per request at 1M+ messages, and Kafka brings a JVM and the
+  RAM that comes with it. That call is mine.
+- **[33]–[39]** — When a memory claim in the README turned out to be wrong, I did
+  not simply reword it. I re-ran the benchmark at 100k / 500k / 1M with the worker
+  count held constant to find out what actually scaled, then rewrote the section
+  around the measurement.
 
 ---
 
