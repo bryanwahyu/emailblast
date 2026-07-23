@@ -203,7 +203,9 @@ Swapping the in-process channel for NATS makes the pool horizontally scalable:
 - **What changes**: only the producer (CSV → publish) and the sink
   (`checkpoint.Done` → `msg.Ack`). The `Sender`, shared rate limiter, retry
   classifier, and DLQ logic port **unchanged** — the rate limiter now throttles
-  per node, so set it to `quota / node_count`.
+  per node, so set it to `quota / node_count`. [Watermill](https://watermill.io)'s
+  NATS JetStream Pub/Sub can own the publish/ack + retry/poison-queue wiring so
+  those two touch-points stay a few lines each.
 
 ## Components
 
@@ -415,7 +417,10 @@ Today it's single-node: the jobs channel lives in-process. To go multi-node
 (survive a machine dying mid-run, spread load across boxes), swap that channel
 for a distributed queue. **My pick is [NATS](https://nats.io) (JetStream):**
 
-- **Fast + lightweight** — a single Go binary, millions of msgs/sec, tiny
+- **Easy** — a single self-contained Go binary, no ZooKeeper/broker cluster to
+  babysit like Kafka. Trivial to run locally, in Docker, or as a small cluster;
+  minimal ops surface.
+- **Faster + lightweight** — millions of msgs/sec, sub-ms latency, tiny memory
   footprint; fits the same "robust and fast" reasoning as the app itself.
 - **JetStream durability** — persistent streams + acks give at-least-once
   delivery and redelivery on consumer crash, replacing the local checkpoint's
@@ -423,6 +428,17 @@ for a distributed queue. **My pick is [NATS](https://nats.io) (JetStream):**
 - **Consumer groups** — many worker nodes pull from one stream and NATS balances
   the work; each node runs this exact pool, just reading jobs from NATS instead
   of the CSV producer.
+
+**Combine with [Watermill](https://watermill.io):** rather than wiring the NATS
+client by hand, use Watermill — a Go library for event-driven / message-stream
+apps with a first-class NATS JetStream Pub/Sub. It gives a broker-agnostic
+`Publisher`/`Subscriber` interface plus middleware (retry, poison queue,
+correlation IDs, metrics) out of the box. Concretely: the CSV producer becomes a
+Watermill `Publisher.Publish`, and each worker node is a Watermill handler whose
+body is our existing `Sender.Send` + rate limiter. Because Watermill abstracts
+the transport, the same code runs on NATS today and could move to Kafka/RabbitMQ
+later without touching the send pipeline — and its built-in retry/poison-queue
+middleware maps directly onto our retry + DLQ semantics.
 
 Only the producer (CSV → channel) and the sink (`checkpoint.Done`) change; the
 `Sender`, rate limiter, retry/backoff, and DLQ logic port unchanged. (SQS/Kafka
