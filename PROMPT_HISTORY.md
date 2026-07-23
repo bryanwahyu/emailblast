@@ -43,6 +43,9 @@ to the corresponding raw entry. Session date: 2026-07-23.
 | 39 | SMTP limit → use queue? | Rate limiter + NATS/Watermill queue answer | [T39](TRANSCRIPT.md) |
 | 40 | Tell users: SMTP mail | README SMTP send-limit callout (-rate + queue) | [T40](TRANSCRIPT.md) |
 | 41 | Update history files | Appended [40]–[41] to both | [T41](TRANSCRIPT.md) |
+| 42 | Fix typos + add "How I worked" | Removed stray typo, added collaboration section | [T42](TRANSCRIPT.md) |
+| 43 | Rewrite "How I worked" | First-person decision-driven style | [T43](TRANSCRIPT.md) |
+| 44 | Update history files | Appended [42]–[44] to both | [T44](TRANSCRIPT.md) |
 
 ## Architecture decisions captured
 

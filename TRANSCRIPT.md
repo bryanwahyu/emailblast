@@ -263,3 +263,19 @@ Committed + pushed.
 **[41]** > `update TRANSCRIPT.md and PROMPT_HISTORY.md`
 
 Appended entries [40]–[41] to both files.
+
+**[42]** > `is there we have typo please fix them all and need to add … how i worked with you`
+
+Fixed the one real typo (a stray `jus`); kept verbatim prompt typos as the raw
+record. Added a first "How I worked with the assistant" section (later rewritten
+in [43]).
+
+**[43]** > `make a sample just like this I use an assistant to move faster through decisions …`
+
+Rewrote the "How I worked" section in the supplied first-person, decision-driven
+style, anchored to the log refs ([1]–[2], [5]–[6], [7], [10], [28], [30]–[31],
+[33]–[39]). Committed + pushed.
+
+**[44]** > `update PROMPT_HISTORY.md too`
+
+Appended entries [42]–[44] to both files.
