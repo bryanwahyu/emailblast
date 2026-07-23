@@ -1,0 +1,6 @@
+id,email,first_name,plan
+u001,alice@example.com,Alice,Pro
+u002,bob@example.com,Bob,Free
+u003,carol@example.com,Carol,Enterprise
+u004,dave@example.com,Dave,Pro
+u005,erin@example.com,Erin,Free

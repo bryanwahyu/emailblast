@@ -1,0 +1,7 @@
+.git
+.env
+*.log
+/emailblast
+/bin
+.DS_Store
+README.md
