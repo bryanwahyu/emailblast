@@ -43,6 +43,23 @@ on the `mock` backend — zero emails were delivered.
 - **Clock/RNG-free core** where it matters: the CSV generator is deterministic so
   runs are reproducible.
 
+## Why Go
+
+Go is the right tool for this: **robust and fast** for high-concurrency I/O work.
+
+- **Cheap concurrency** — goroutines cost ~2 KB each vs ~1 MB for an OS thread, so
+  hundreds-to-thousands of concurrent senders are trivial. Email sending is
+  I/O-bound (waiting on the network), so goroutines park cheaply while blocked
+  instead of burning CPU.
+- **Channels give backpressure for free** — the buffered jobs channel bounds
+  memory without any external broker; the producer blocks when workers fall
+  behind, so a 1M list never balloons RAM (measured ~270 MB peak).
+- **Robust by construction** — static typing, `errgroup` for clean lifecycle +
+  error propagation, `context` for graceful cancellation, and a single static
+  binary (CGO off) that drops into any Alpine container with no runtime deps.
+- **Fast in practice** — 47k sends/sec on a laptop in the benchmark below, with
+  the real ceiling being the ESP quota, not the language.
+
 ## Architecture
 
 ```
@@ -273,9 +290,22 @@ Raw evidence: [`bench/results/benchmark_raw.txt`](bench/results/benchmark_raw.tx
 
 ## Scale beyond one node
 
-For durable, multi-node sending (survive a machine dying mid-run), put the jobs
-on **SQS/Kafka** instead of the in-process channel and run this worker pool on
-many boxes — the `Sender`, checkpoint, and retry logic port unchanged.
+Today it's single-node: the jobs channel lives in-process. To go multi-node
+(survive a machine dying mid-run, spread load across boxes), swap that channel
+for a distributed queue. **My pick is [NATS](https://nats.io) (JetStream):**
+
+- **Fast + lightweight** — a single Go binary, millions of msgs/sec, tiny
+  footprint; fits the same "robust and fast" reasoning as the app itself.
+- **JetStream durability** — persistent streams + acks give at-least-once
+  delivery and redelivery on consumer crash, replacing the local checkpoint's
+  role for cross-machine work.
+- **Consumer groups** — many worker nodes pull from one stream and NATS balances
+  the work; each node runs this exact pool, just reading jobs from NATS instead
+  of the CSV producer.
+
+Only the producer (CSV → channel) and the sink (`checkpoint.Done`) change; the
+`Sender`, rate limiter, retry/backoff, and DLQ logic port unchanged. (SQS/Kafka
+work too — NATS is the leanest option here.)
 
 ## Build & test
 
