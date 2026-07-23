@@ -441,8 +441,18 @@ later without touching the send pipeline — and its built-in retry/poison-queue
 middleware maps directly onto our retry + DLQ semantics.
 
 Only the producer (CSV → channel) and the sink (`checkpoint.Done`) change; the
-`Sender`, rate limiter, retry/backoff, and DLQ logic port unchanged. (SQS/Kafka
-work too — NATS is the leanest option here.)
+`Sender`, rate limiter, retry/backoff, and DLQ logic port unchanged.
+
+**Why NATS over the alternatives:**
+
+| Broker | Trade-off for this workload |
+|--------|------------------------------|
+| **NATS (JetStream)** | Single Go binary, low RAM, millions of msgs/sec, no external deps. **Chosen.** |
+| **SQS** | Fully managed, but **you pay per request** — at 1M+ messages (plus acks/retries) the per-API-call cost adds up, and it locks you to AWS. |
+| **Kafka** | Battle-tested at scale, but **heavy on RAM/ops** — JVM brokers + ZooKeeper/KRaft, page-cache hungry, real cluster to run and tune. Overkill for a send queue. |
+
+For a fire-and-drain send workload, NATS gives the durability we need without
+SQS's per-message bill or Kafka's memory + operational weight.
 
 ## Build & test
 
