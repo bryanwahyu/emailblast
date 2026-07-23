@@ -4,7 +4,7 @@ This is the build log of **emailblast** — a fast, resumable, personalized bulk
 email sender in Go (bounded goroutine worker pool, rate limiting, retry, crash-safe
 checkpoint resume; mock / pooled-SMTP / SES backends). Repo:
 https://github.com/bryanwahyu/emailblast
-
+jus
 Raw, unpolished log of the prompts that drove this project, in order, verbatim
 (typos and all), each with a short note of what happened. Not cleaned up on
 purpose — this is the record, not a summary. For a tidy index see
@@ -227,3 +227,14 @@ Answered: yes — the shared rate limiter already respects an SMTP send limit
 (`-rate`), and for durability / multi-node the queue (NATS JetStream, optionally
 via Watermill) is the right add. Explained per-provider throttling and the queue
 design (see reply).
+
+**[40]** > `just tell them if they want use SMPT mail`
+
+Added a short callout to the README SMTP section: if you use SMTP mail, set
+`-rate` to the provider's send cap (limiter throttles all workers under it); for
+a daily/hourly cap or multi-account/multi-node, put a NATS queue in front.
+Committed + pushed.
+
+**[41]** > `update TRANSCRIPT.md and PROMPT_HISTORY.md`
+
+Appended entries [40]–[41] to both files.
