@@ -110,3 +110,46 @@ README badge, and set the repo description + topics.
 
 Produced the final English summary (architecture decision, benchmark table,
 assumptions, and deliberately-not-done list).
+
+**[22]** > `'.../TRANSCRIPT.md' change it to english language`
+
+Translated the remaining Indonesian prompts ([19], [20], [21]) in this file to
+English, marked `(translated from Indonesian)`. Committed + pushed.
+
+**[23]** > `is good ?`
+
+Ran a health check: build (both tags) + vet + tests all pass, git clean, CI
+green in progress.
+
+**[24]** > `push it`
+
+Nothing to push — already up to date.
+
+**[25]** > `updated readme make sure them Are good`
+
+Read the whole README; verified flags/benchmark/links accurate. Fixed one stale
+line: component table said the body was `text/template` → corrected to
+`html/template`. Committed + pushed.
+
+**[26]** > `tell them why i choose golang because robust and fast also if i want to i'm need nats for multi node`
+
+Added a **Why Go** section (cheap goroutines, free channel backpressure, static
+binary, measured 47k/s) and rewrote the multi-node section around **NATS
+JetStream** as the pick. Committed + pushed.
+
+**[27]** > `also make it deep technical`
+
+Added an **Internals — deep dive** section: concurrency model, backpressure +
+memory analysis, token-bucket rate limiting, retry/error classification,
+checkpoint crash semantics + duplicate-window bound, SMTP pool cost model, and a
+concrete NATS JetStream design. Committed + pushed.
+
+**[28]** > `verify the readme links and code refs are accurate`
+
+Audited every link and `file:line` ref against the source. All correct except
+one: errgroup was cited at `blast.go:112` (that line is the limiter) → fixed to
+`blast.go:118`. Committed + pushed.
+
+**[29]** > `updated PROMPT_HISTORY.md / TRANSCRIPT.md`
+
+Appended entries [22]–[29] to both this file and the PROMPT_HISTORY.md index.
