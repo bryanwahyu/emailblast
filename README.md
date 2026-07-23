@@ -72,7 +72,7 @@ the quota. Everything above that just queues.
 | File | Role |
 |------|------|
 | `internal/source/csv.go` | Streams recipients lazily (1M rows never in RAM) |
-| `internal/render/render.go` | Parse-once `text/template`, concurrent-safe merge |
+| `internal/render/render.go` | Parse-once subject (`text/template`) + body (`html/template`, auto-escaped), concurrent-safe |
 | `internal/blast/blast.go` | Worker pool, rate limiter, retry/backoff, DLQ |
 | `internal/checkpoint/checkpoint.go` | Resumable progress log (crash-safe) |
 | `internal/sender/sender.go` | `Sender` interface + `mock` backend (default) |
