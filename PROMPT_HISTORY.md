@@ -34,6 +34,8 @@ to the corresponding raw entry. Session date: 2026-07-23.
 | 30 | Why NATS + Watermill | NATS rationale + Watermill integration | [T30](TRANSCRIPT.md) |
 | 31 | SQS cost, Kafka RAM | Broker trade-off table | [T31](TRANSCRIPT.md) |
 | 32 | Update history files | Appended [30]–[32] to both | [T32](TRANSCRIPT.md) |
+| 33 | Verify memory claim | Claim was false: memory is O(recipients); README corrected | [T33](TRANSCRIPT.md) |
+| 34 | Update history + O(log n)? | This update + O(log n) memory answer | [T34](TRANSCRIPT.md) |
 
 ## Architecture decisions captured
 
