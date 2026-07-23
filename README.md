@@ -84,6 +84,127 @@ Go is the right tool for this: **robust and fast** for high-concurrency I/O work
 ESP and waste memory. N workers where `N ≈ quota × latency` is enough to saturate
 the quota. Everything above that just queues.
 
+## Internals — deep dive
+
+### Concurrency model
+
+One `errgroup.Group` (`blast.go:112`) owns every goroutine and a derived
+`context`. Topology:
+
+```
+producer(1) ──chan model.Job (buffered, cap = workers×4)──▶ workers(N)
+     │                                                          │
+ CSV stream                                          limiter.Wait(ctx) ─▶ Sender.Send
+```
+
+- **Producer** (`blast.go`, one goroutine) owns the dedup set (a plain
+  `map[string]struct{}`, no mutex — single writer) and the checkpoint skip check,
+  then pushes `model.Job` onto the channel. It `select`s on `ctx.Done()` so a
+  cancel unblocks a full-channel send instead of deadlocking. It `close()`s the
+  channel on drain — the signal that lets workers `range` to completion.
+- **Workers** (N goroutines) `for job := range jobs`. Channel receive is the
+  synchronization point; no shared mutable state between workers except atomic
+  counters (`Stats`). A worker returns a non-nil error **only** on context
+  cancellation — per-recipient failures are swallowed into the DLQ so one bad
+  address never collapses the pool via `errgroup`'s first-error cancel.
+- **Cancellation** propagates through `ctx`: `errgroup` cancels on first error;
+  SIGTERM/SIGINT cancel via `signal.NotifyContext` (`main.go`). `limiter.Wait`,
+  channel sends, and backoff sleeps all `select` on `ctx.Done()`, so shutdown is
+  prompt and in-flight sends drain rather than truncate.
+
+### Backpressure & memory
+
+The channel is bounded (`cap = workers×4`, `blast.go:61`). When workers can't keep
+up, the buffer fills and the producer's send **blocks** — that is the
+backpressure. Consequence: resident set is `O(workers)`, not `O(recipients)`.
+Concretely, live memory ≈ `(buffered jobs + in-flight) × sizeof(User)` — a few MB
+regardless of a 1M-row / 45 MB input (measured 270 MB peak, dominated by the Go
+runtime + `html/template` buffers, not the list).
+
+The CSV reader uses `ReuseRecord` (`csv.go`) — one backing array reused per row —
+so parsing 1M rows allocates almost nothing per row. Field values are copied out
+with `strings.Clone` precisely because the backing array is about to be
+overwritten; without the clone, every `User` would alias freed bytes.
+
+### Rate limiting — token bucket
+
+`golang.org/x/time/rate.Limiter` (`blast.go:114`) is a token bucket: refills at
+`Limit` tokens/sec, holds up to `Burst` at once. Every worker shares **one**
+limiter, so the aggregate send rate across all N goroutines is globally capped —
+the workers exist only to hide per-call latency, the limiter is the true throttle.
+`limiter.Wait(ctx)` blocks until a token is free or `ctx` is done. `Burst`
+defaults to `RatePerSec` (one second of slack); set `-rate 0` to remove the
+limiter entirely (throughput then bounded by `workers / latency`). This is why
+throughput is `min(rate, workers/latency)` capped by the ESP quota.
+
+### Retry & error classification
+
+`process()` (`blast.go`) renders once, then loops up to `MaxAttempts`. Errors are
+classified, not blindly retried:
+
+- **Retryable** (`isRetryable` → `errors.Is(err, sender.ErrRetryable)`): backends
+  wrap transient faults — SES throttling / 5xx, SMTP 4xx on `RCPT`, any dial or
+  network error — with `fmt.Errorf("%w: …", ErrRetryable)`. `errors.Is` unwraps
+  the chain, so nested wraps still classify correctly.
+- **Permanent** (bad address, SMTP 5xx, auth failure, a render error): straight to
+  DLQ, no retry — retrying can't fix them and would waste quota.
+
+Backoff is exponential: `200ms → 400ms → 800ms …` (`backoff *= 2`), each sleep
+`select`ing on `ctx`. On exhaustion or a permanent error the ID + cause append to
+the dead-letter file under a mutex.
+
+### Checkpoint durability & the duplicate window
+
+`checkpoint.log` is an append-only newline list of completed IDs, fronted by an
+in-memory `map[string]struct{}` for O(1) skip checks. On startup the file is
+loaded into the set (`Open`), giving resume. Writes go through a `bufio.Writer`.
+
+The subtle part is the **crash semantics**:
+
+- `bufio.Flush()` (called every 2s by the progress goroutine, `main.go:257`)
+  pushes buffered bytes into the OS. A `kill -9` of the *process* does **not** lose
+  flushed data — the page cache belongs to the kernel, not the process.
+- What a hard kill *can* lose is the bytes still sitting in the in-process `bufio`
+  buffer since the last flush. So the **duplicate window is bounded by the flush
+  interval**: at rate `R`, at most `~2s × R` recipients could be re-sent on resume.
+- That is deliberately at-least-once, not exactly-once — the idempotency key
+  (`Message-ID` / SES tag) lets a downstream layer dedup if it must. Full fsync
+  per record would make it tighter but throttle throughput to disk-sync speed;
+  the 2s window is the chosen trade. The benchmark's crash test hit this path and
+  resumed with **zero** duplicates because a flush had landed before the kill.
+
+### SMTP connection pooling — cost model
+
+Per-message SMTP cost without pooling is dominated by the handshake: TCP + STARTTLS
+(a TLS handshake ≈ 1–2 RTT) + AUTH — easily 100–300 ms before a single byte of
+mail. `SMTPSender` (`smtp.go`) keeps a buffered channel of live `*smtp.Client`;
+`getConn` pulls an idle one (handshake already paid) or dials, and after a
+successful `DATA` it issues `RSET` and returns the connection to the pool. So the
+handshake is amortized: `total ≈ handshake × pool_size + per_msg_txn × messages`
+instead of `(handshake + per_msg_txn) × messages`. A connection that errors is
+`Close()`d and dropped, never returned — one broken link can't poison the pool.
+Pool size defaults to `-workers` so every worker can hold a warm connection.
+
+### NATS JetStream — concrete multi-node design
+
+Swapping the in-process channel for NATS makes the pool horizontally scalable:
+
+- **Stream**: `EMAILS`, subject `emails.jobs.*`, `FileStorage`, retention
+  `WorkQueue` (a message is removed once acked — natural once-delivery within the
+  cluster).
+- **Producer**: the CSV reader publishes one message per recipient with header
+  `Nats-Msg-Id: <user.ID>`. JetStream's dedup window drops duplicate publishes,
+  so a producer retry can't double-enqueue.
+- **Consumers**: a **pull** consumer with `AckExplicit`, `MaxAckPending` ≈ the node's
+  worker count, and `AckWait` > worst-case send-time. Each node runs *this exact
+  pool*; workers `Fetch` a batch, send, then `msg.Ack()` — **`Ack` replaces
+  `checkpoint.Done`**. A node crash means unacked messages redeliver elsewhere
+  after `AckWait` (`MaxDeliver` caps attempts → terminal `msg.Term()` = DLQ).
+- **What changes**: only the producer (CSV → publish) and the sink
+  (`checkpoint.Done` → `msg.Ack`). The `Sender`, shared rate limiter, retry
+  classifier, and DLQ logic port **unchanged** — the rate limiter now throttles
+  per node, so set it to `quota / node_count`.
+
 ## Components
 
 | File | Role |
