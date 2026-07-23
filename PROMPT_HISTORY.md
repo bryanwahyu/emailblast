@@ -41,6 +41,8 @@ to the corresponding raw entry. Session date: 2026-07-23.
 | 37 | Update README + history | Dragonfly in escape-hatch + entries 35–37 | [T37](TRANSCRIPT.md) |
 | 38 | Reconcile 253 vs 270 MB | Config-labelled RSS, noise flagged, clean scaling table | [T38](TRANSCRIPT.md) |
 | 39 | SMTP limit → use queue? | Rate limiter + NATS/Watermill queue answer | [T39](TRANSCRIPT.md) |
+| 40 | Tell users: SMTP mail | README SMTP send-limit callout (-rate + queue) | [T40](TRANSCRIPT.md) |
+| 41 | Update history files | Appended [40]–[41] to both | [T41](TRANSCRIPT.md) |
 
 ## Architecture decisions captured
 
