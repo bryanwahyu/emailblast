@@ -52,8 +52,9 @@ Go is the right tool for this: **robust and fast** for high-concurrency I/O work
   I/O-bound (waiting on the network), so goroutines park cheaply while blocked
   instead of burning CPU.
 - **Channels give backpressure for free** — the buffered jobs channel bounds
-  memory without any external broker; the producer blocks when workers fall
-  behind, so a 1M list never balloons RAM (measured ~270 MB peak).
+  in-flight work without any external broker; the producer blocks when workers
+  fall behind. CSV *rows* are streamed, never all held at once (measured ~253 MB
+  peak at 1M — see the memory note below for what does scale with list size).
 - **Robust by construction** — static typing, `errgroup` for clean lifecycle +
   error propagation, `context` for graceful cancellation, and a single static
   binary (CGO off) that drops into any Alpine container with no runtime deps.
@@ -116,15 +117,33 @@ producer(1) ──chan model.Job (buffered, cap = workers×4)──▶ workers(N
 
 The channel is bounded (`cap = workers×4`, `blast.go:61`). When workers can't keep
 up, the buffer fills and the producer's send **blocks** — that is the
-backpressure. Consequence: resident set is `O(workers)`, not `O(recipients)`.
-Concretely, live memory ≈ `(buffered jobs + in-flight) × sizeof(User)` — a few MB
-regardless of a 1M-row / 45 MB input (measured 270 MB peak, dominated by the Go
-runtime + `html/template` buffers, not the list).
+backpressure. So the **in-flight working set** (buffered jobs + goroutine stacks)
+is `O(workers)`, independent of list size.
 
-The CSV reader uses `ReuseRecord` (`csv.go`) — one backing array reused per row —
-so parsing 1M rows allocates almost nothing per row. Field values are copied out
-with `strings.Clone` precisely because the backing array is about to be
-overwritten; without the clone, every `User` would alias freed bytes.
+But **total memory is `O(unique recipients)`**, not `O(workers)` — and that is by
+design. Two correctness structures hold one entry per recipient:
+
+- the producer's dedup set (`seen map[string]struct{}`, `blast.go:127`) — one key
+  per unique normalized email, so duplicates can be dropped;
+- the checkpoint's completed set (`done map[string]struct{}`, `checkpoint.go:24`)
+  — one key per sent ID, so a rerun can resume.
+
+Measured (mock, 500 workers held constant):
+
+| Recipients | Peak RSS |
+|-----------:|---------:|
+| 100,000 | 40 MB |
+| 1,000,000 | 253 MB |
+
+Workers were identical in both runs, yet RSS grew ~6× — proof the growth is the
+two per-recipient maps, not the pool. Rough cost: a `map[string]struct{}` of 1M
+short keys is ~100–150 MB (Go map overhead + the key strings), consistent with the
+jump above. **What streaming *does* guarantee:** the CSV rows themselves are never
+all resident — the reader uses `ReuseRecord` (`csv.go`, one backing array reused
+per row) and copies fields out with `strings.Clone` (so a `User` never aliases the
+soon-overwritten buffer). If you need flat memory for a truly huge list, move
+dedup + resume to an external store (Redis set / bloom filter / the NATS
+JetStream design below) — the in-process maps are the single-node trade-off.
 
 ### Rate limiting — token bucket
 
@@ -401,8 +420,10 @@ Raw evidence: [`bench/results/benchmark_raw.txt`](bench/results/benchmark_raw.tx
 
 **Two things this proves:**
 
-1. **Memory is bounded by streaming, not by list size** — peak RSS stayed ~270 MB
-   for a 1M-row (45 MB) input; nothing loads the full list into RAM.
+1. **The full CSV is never loaded into RAM** — rows are streamed; peak RSS was
+   ~270 MB for a 1M-row (45 MB) input. Note that memory still scales with *unique
+   recipients* (the dedup + checkpoint indexes are O(n) — see the memory note in
+   Internals), not with the raw file size.
 2. **Checkpoint resume is exact** — after a hard `kill -9`, the rerun skipped
    *precisely* the 446,574 already sent and completed the remaining 553,426.
    446,574 + 553,426 = 1,000,000, no loss, no duplicates.
