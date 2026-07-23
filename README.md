@@ -88,7 +88,7 @@ the quota. Everything above that just queues.
 
 ### Concurrency model
 
-One `errgroup.Group` (`blast.go:112`) owns every goroutine and a derived
+One `errgroup.Group` (`blast.go:118`) owns every goroutine and a derived
 `context`. Topology:
 
 ```
