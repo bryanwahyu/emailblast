@@ -33,8 +33,9 @@ type SMTPSender struct {
 	host string // "mail.example.com"
 	port string // "587" (STARTTLS) or "25"
 	from string // envelope + header From
-	auth smtp.Auth
-	tls  bool // use STARTTLS
+	auth  smtp.Auth
+	tls   bool // use STARTTLS
+	unsub Unsubscribe
 
 	pool chan *smtp.Client // idle, ready-to-reuse connections
 }
@@ -45,7 +46,7 @@ type SMTPSender struct {
 //
 // Size the pool to roughly the number of concurrent workers hitting SMTP; extra
 // connections beyond that just sit idle.
-func NewSMTP(host, port, from, user, pass string, useTLS bool, poolSize int) *SMTPSender {
+func NewSMTP(host, port, from, user, pass string, useTLS bool, poolSize int, unsub Unsubscribe) *SMTPSender {
 	var auth smtp.Auth
 	if user != "" {
 		auth = smtp.PlainAuth("", user, pass, host)
@@ -54,7 +55,7 @@ func NewSMTP(host, port, from, user, pass string, useTLS bool, poolSize int) *SM
 		poolSize = 1
 	}
 	return &SMTPSender{
-		host: host, port: port, from: from, auth: auth, tls: useTLS,
+		host: host, port: port, from: from, auth: auth, tls: useTLS, unsub: unsub,
 		pool: make(chan *smtp.Client, poolSize),
 	}
 }
@@ -148,7 +149,7 @@ func (s *SMTPSender) deliver(c *smtp.Client, u model.User, msg render.Message, k
 	if err != nil {
 		return fmt.Errorf("%w: DATA: %v", ErrRetryable, err)
 	}
-	if _, err := wc.Write(buildMIME(s.from, u.Email, key, msg)); err != nil {
+	if _, err := wc.Write(buildMIME(s.from, u.Email, key, msg, s.unsub)); err != nil {
 		wc.Close()
 		return fmt.Errorf("%w: write body: %v", ErrRetryable, err)
 	}
@@ -159,13 +160,21 @@ func (s *SMTPSender) deliver(c *smtp.Client, u model.User, msg render.Message, k
 }
 
 // buildMIME assembles a minimal RFC 5322 HTML message. Message-ID carries the
-// idempotency key so a resend after crash is detectable downstream.
-func buildMIME(from, to, key string, msg render.Message) []byte {
+// idempotency key so a resend after crash is detectable downstream. When
+// unsubscribe is configured, List-Unsubscribe (+ List-Unsubscribe-Post for
+// one-click, RFC 8058) headers are added — required by Gmail/Yahoo bulk rules.
+func buildMIME(from, to, key string, msg render.Message, unsub Unsubscribe) []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "From: %s\r\n", from)
 	fmt.Fprintf(&b, "To: %s\r\n", to)
 	fmt.Fprintf(&b, "Subject: %s\r\n", msg.Subject)
 	fmt.Fprintf(&b, "Message-ID: <%s@emailblast>\r\n", key)
+	if v := unsub.Header(to); v != "" {
+		fmt.Fprintf(&b, "List-Unsubscribe: %s\r\n", v)
+		if unsub.OneClick() {
+			b.WriteString("List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n")
+		}
+	}
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
 	b.WriteString("\r\n")

@@ -1,12 +1,18 @@
 // Package render turns a template + a user's merge fields into a concrete
 // subject and body. Templates are parsed once and reused across all workers
-// (text/template is safe for concurrent Execute).
+// (both text/template and html/template are safe for concurrent Execute).
+//
+// The subject is text/template (plain text). The body is html/template, which
+// context-aware auto-escapes merge values so a name like `O'Brien & <Sons>`
+// becomes `O&#39;Brien &amp; &lt;Sons&gt;` in the HTML instead of breaking the
+// markup or opening an injection hole.
 package render
 
 import (
 	"bytes"
 	"fmt"
-	"text/template"
+	htmltmpl "html/template"
+	texttmpl "text/template"
 
 	"emailblast/internal/model"
 )
@@ -19,19 +25,19 @@ type Message struct {
 
 // Renderer holds pre-parsed templates shared by all workers.
 type Renderer struct {
-	subject *template.Template
-	body    *template.Template
+	subject *texttmpl.Template
+	body    *htmltmpl.Template
 }
 
-// New parses the subject and body templates once. Use Go text/template syntax
-// referencing merge fields, e.g. "Hi {{.first_name}}". Missing keys render as
-// empty rather than erroring (Option "missingkey=zero").
+// New parses the subject (text) and body (HTML) templates once. Use Go template
+// syntax referencing merge fields, e.g. "Hi {{.first_name}}". Missing keys
+// render as empty rather than erroring (Option "missingkey=zero").
 func New(subjectTmpl, bodyTmpl string) (*Renderer, error) {
-	s, err := template.New("subject").Option("missingkey=zero").Parse(subjectTmpl)
+	s, err := texttmpl.New("subject").Option("missingkey=zero").Parse(subjectTmpl)
 	if err != nil {
 		return nil, fmt.Errorf("parse subject: %w", err)
 	}
-	b, err := template.New("body").Option("missingkey=zero").Parse(bodyTmpl)
+	b, err := htmltmpl.New("body").Option("missingkey=zero").Parse(bodyTmpl)
 	if err != nil {
 		return nil, fmt.Errorf("parse body: %w", err)
 	}
@@ -39,7 +45,8 @@ func New(subjectTmpl, bodyTmpl string) (*Renderer, error) {
 }
 
 // Render executes both templates against the user's merge fields. Buffers are
-// caller-local so this is safe to call concurrently from every worker.
+// caller-local so this is safe to call concurrently from every worker. HTML
+// escaping of merge values is automatic in the body.
 func (r *Renderer) Render(u model.User) (Message, error) {
 	var sb, bb bytes.Buffer
 	if err := r.subject.Execute(&sb, u.Fields); err != nil {

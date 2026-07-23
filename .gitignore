@@ -9,6 +9,11 @@ dead-letter.log
 # build output
 /emailblast
 /bin/
+bench/emailblast
+
+# generated test data (regenerate with: go run ./cmd/gencsv)
+users_*.csv
+bench/*.csv
 
 # OS junk
 .DS_Store
