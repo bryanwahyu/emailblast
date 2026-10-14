@@ -2,524 +2,113 @@
 
 [![CI](https://github.com/bryanwahyu/emailblast/actions/workflows/ci.yml/badge.svg)](https://github.com/bryanwahyu/emailblast/actions/workflows/ci.yml)
 
-Fast, resumable, personalized bulk email sender in Go. Built for **1M+ recipients**
-on a single node using a bounded goroutine worker pool.
+A single-binary Go CLI that sends a personalised HTML email to every row of a CSV, through SMTP or Amazon SES, and can resume after a crash without starting over.
 
-The real ceiling is your **ESP sending quota**, not Go. Goroutines are cheap;
-the pool just hides network latency behind a shared rate limiter that respects
-that quota.
+## Why
 
-## Safety
+Sending one templated email to a few hundred thousand people sounds trivial until the process dies halfway through. Then you have to work out who already got it, you can't load the whole list into memory, and the provider will throttle you if you go faster than your quota. I wanted a tool where the CSV is streamed, the send rate is capped in one place, and a rerun picks up where the last one stopped.
 
-**By default this program sends no real email.** The default backend is `mock`,
-which only logs what it would send. No message leaves the machine unless you
-explicitly pass `-backend smtp` or `-backend ses` with real credentials. Before
-any real blast, `-dryrun` wraps *any* backend to render and count against the
-real recipient list while sending nothing. The 1M benchmark below ran entirely
-on the `mock` backend — zero emails were delivered.
+By default nothing is sent: the backend is `mock`, which only logs. Real mail goes out only with `-backend smtp` or `-backend ses`.
 
-## Assumptions
+## How it works
 
-- **Input** is a CSV with `id` and `email` columns; every other column is a
-  personalization merge field. `id` is stable and unique (used as the
-  idempotency / checkpoint key).
-- **Delivery is at-least-once, not exactly-once.** A crash between send and
-  checkpoint-flush can re-send a recipient; the idempotency key mitigates
-  downstream but SES/SMTP have no native dedup.
-- **The ESP sending quota is the throughput ceiling**, not Go. Worker count is
-  sized to hide latency, not to exceed the quota.
-- **Single node.** State lives in an in-process channel + a local checkpoint
-  file; there is no cross-machine coordination.
-- **Sender reputation, IP warmup, and DNS auth (SPF/DKIM/DMARC/PTR) are the
-  operator's responsibility.** This tool sends; it does not manage deliverability.
-- **`List-Unsubscribe` is required for real bulk sending** (Gmail/Yahoo rules);
-  supply `-unsub-url` and/or `-unsub-mailto`. The program warns if unset.
-- **Recipient emails may contain duplicates**; the producer dedups them
-  (trim + lowercase) within a run and reports the count.
-- **Bounce/complaint processing is out of scope** — wire SES SNS events or your
-  MTA logs to a suppression list separately.
-- **The benchmark uses a `mock` sender with simulated latency**; real-world rate
-  is bounded by your ESP, not by the numbers here.
-- **Clock/RNG-free core** where it matters: the CSV generator is deterministic so
-  runs are reproducible.
-
-## Why Go
-
-Go is the right tool for this: **robust and fast** for high-concurrency I/O work.
-
-- **Cheap concurrency** — goroutines cost ~2 KB each vs ~1 MB for an OS thread, so
-  hundreds-to-thousands of concurrent senders are trivial. Email sending is
-  I/O-bound (waiting on the network), so goroutines park cheaply while blocked
-  instead of burning CPU.
-- **Channels give backpressure for free** — the buffered jobs channel bounds
-  in-flight work without any external broker; the producer blocks when workers
-  fall behind. CSV *rows* are streamed, never all held at once (~250 MB peak at 1M
-  — see the memory note below for what does scale with list size).
-- **Robust by construction** — static typing, `errgroup` for clean lifecycle +
-  error propagation, `context` for graceful cancellation, and a single static
-  binary (CGO off) that drops into any Alpine container with no runtime deps.
-- **Fast in practice** — 47k sends/sec on a laptop in the benchmark below, with
-  the real ceiling being the ESP quota, not the language.
-
-## Architecture
-
-```
- CSV (streamed, never fully in RAM)
-        │
-   producer goroutine ── skips IDs already in checkpoint
-        │
-   jobs channel (buffered  →  backpressure, bounded memory)
-        │
-   ┌────┴────┬──────────┬──────────┐
- worker    worker     worker   … N goroutines
-   │          │          │
-   └── rate.Limiter (shared, = ESP quota) ──┘
-        │
-   render template  →  Sender.Send()  →  ESP
-        │                                  │
-   success → checkpoint.Done(id)      fail → retry w/ exp backoff
-                                            └ exhausted → dead-letter.log
+```mermaid
+flowchart LR
+    CSV[CSV reader] -->|users chan| P[producer<br/>dedup + checkpoint skip]
+    P -->|jobs chan, buffered| W[N workers]
+    W --> R[render templates]
+    R --> L[shared rate limiter]
+    L --> S{sender<br/>mock / smtp / ses}
+    S -->|ok| CP[(checkpoint.log)]
+    S -->|retryable| W
+    S -->|permanent or out of attempts| DLQ[(dead-letter.log)]
 ```
 
-**Why fixed workers, not one goroutine per user:** 1M goroutines would flood the
-ESP and waste memory. N workers where `N ≈ quota × latency` is enough to saturate
-the quota. Everything above that just queues.
+- `internal/source` streams the CSV in a goroutine. Columns `id` and `email` are required, every other column becomes a template field (`{{.first_name}}`).
+- `internal/blast` owns the pipeline: one producer, a fixed pool of workers under an `errgroup`, one `rate.Limiter` shared by all workers.
+- `internal/sender` has the backends. SES is behind the `ses` build tag so the default binary has no AWS dependency.
+- `internal/checkpoint` is an append-only file of completed IDs plus an in-memory set.
 
-## Internals — deep dive
+## Design decisions
 
-### Concurrency model
+**A fixed worker pool with one shared limiter, not a goroutine per recipient.** Sending is I/O-bound, so workers mostly wait on the network; the pool size only has to cover `rate × latency`. The limiter is the single place where the provider quota is enforced. Trade-off: throughput is `min(rate, workers / latency)`, so you have to size `-workers` and `-rate` for the backend; more workers past that point just queue.
 
-One `errgroup.Group` (`blast.go:118`) owns every goroutine and a derived
-`context`. Topology:
+**Checkpoint is buffered and flushed every 2 seconds, so delivery is at-least-once.** Each successful send appends the ID to a `bufio.Writer`; a progress goroutine flushes it every 2s. On restart the file is loaded and those IDs are skipped. Writing with `fsync` per record would make the duplicate window smaller but would tie throughput to disk sync speed. I chose the 2s window: after a hard kill, up to ~2s worth of recipients can be sent twice. To let a downstream system dedup, the recipient ID is set as the `Message-ID` (SMTP) or as an `idkey` message tag (SES).
 
-```
-producer(1) ──chan model.Job (buffered, cap = workers×4)──▶ workers(N)
-     │                                                          │
- CSV stream                                          limiter.Wait(ctx) ─▶ Sender.Send
-```
+**Errors are classified at the backend, retried in the pipeline.** Backends wrap transient failures in `sender.ErrRetryable` (SMTP `RCPT` 4xx, SES throttling and server faults). The worker retries those with exponential backoff starting at 200ms, up to `-attempts`; everything else goes straight to the dead-letter file. One bad address never stops the run. Trade-off: the classification is only as good as each backend's mapping of error codes.
 
-- **Producer** (`blast.go`, one goroutine) owns the dedup set (a plain
-  `map[string]struct{}`, no mutex — single writer) and the checkpoint skip check,
-  then pushes `model.Job` onto the channel. It `select`s on `ctx.Done()` so a
-  cancel unblocks a full-channel send instead of deadlocking. It `close()`s the
-  channel on drain — the signal that lets workers `range` to completion.
-- **Workers** (N goroutines) `for job := range jobs`. Channel receive is the
-  synchronization point; no shared mutable state between workers except atomic
-  counters (`Stats`). A worker returns a non-nil error **only** on context
-  cancellation — per-recipient failures are swallowed into the DLQ so one bad
-  address never collapses the pool via `errgroup`'s first-error cancel.
-- **Cancellation** propagates through `ctx`: `errgroup` cancels on first error;
-  SIGTERM/SIGINT cancel via `signal.NotifyContext` (`main.go`). `limiter.Wait`,
-  channel sends, and backoff sleeps all `select` on `ctx.Done()`, so shutdown is
-  prompt and in-flight sends drain rather than truncate.
+**SMTP connections are pooled.** A TLS handshake plus `AUTH` per message dominates the cost of a small send. The SMTP sender keeps a channel of open clients, issues `RSET` between messages, and drops a connection on error instead of returning it. Pool size defaults to `-workers`.
 
-### Backpressure & memory
+Smaller things: duplicate emails in the CSV (after trim + lowercase) are dropped within a run; `-unsub-url` / `-unsub-mailto` add `List-Unsubscribe` headers (one-click when a URL is given); templates use `html/template`, so merge fields are escaped.
 
-The channel is bounded (`cap = workers×4`, `blast.go:61`). When workers can't keep
-up, the buffer fills and the producer's send **blocks** — that is the
-backpressure. So the **in-flight working set** (buffered jobs + goroutine stacks)
-is `O(workers)`, independent of list size.
+## Running it
 
-But **total memory is `O(unique recipients)`**, not `O(workers)` — and that is by
-design. Two correctness structures hold one entry per recipient:
-
-- the producer's dedup set (`seen map[string]struct{}`, `blast.go:127`) — one key
-  per unique normalized email, so duplicates can be dropped;
-- the checkpoint's completed set (`done map[string]struct{}`, `checkpoint.go:24`)
-  — one key per sent ID, so a rerun can resume.
-
-Measured — **500 workers held constant**, only recipient count varied (mock, 1ms
-latency, rate=0, fresh checkpoint):
-
-| Recipients | Peak RSS |
-|-----------:|---------:|
-| 100,000 | 40 MB |
-| 500,000 | 140 MB |
-| 1,000,000 | 252 MB |
-
-Workers were identical across all three, yet RSS grew ~6× — proof the growth is
-the two per-recipient maps, not the pool. Rough cost: a `map[string]struct{}` of
-1M short keys is ~100–150 MB (Go map overhead + the key strings), consistent with
-the jump above. (Peak RSS is noisy — Go heap + GC timing give ±~10% run-to-run —
-so treat these as approximate; the *scaling trend* is the point, not the exact MB.) **What streaming *does* guarantee:** the CSV rows themselves are never
-all resident — the reader uses `ReuseRecord` (`csv.go`, one backing array reused
-per row) and copies fields out with `strings.Clone` (so a `User` never aliases the
-soon-overwritten buffer). If you need flat memory for a truly huge list, move
-dedup + resume to an external store — the in-process maps are the single-node
-trade-off. Options, cheapest-RAM first:
-
-- **[DragonflyDB](https://www.dragonflydb.io)** (recommended) — Redis-wire
-  compatible, so `SADD blast:seen <email>` (dedup) and `SADD/SISMEMBER blast:done
-  <id>` (checkpoint) drop in with any Redis client, no new code. Unlike Redis it's
-  **multi-threaded (thread-per-core, shared-nothing)**, so N workers hammering the
-  set are served across all cores in parallel instead of serialized behind one
-  thread — the store never becomes the throttle, and sender RAM falls to
-  `O(workers)`. Snapshotting persists the checkpoint across a store restart. One
-  container, vertical scale, no Redis-Cluster sharding.
-- **Bloom / cuckoo filter** — O(n) *bits* (~1.2 MB for 1M @ 1% FPR), ~100× smaller
-  than the map, but approximate (a false positive silently skips a real
-  recipient) — pair with an exact on-disk backstop.
-- **NATS JetStream** (see multi-node design below) — for horizontal scale, with
-  Dragonfly holding the shared seen/done sets so every node dedups against one
-  source of truth.
-
-> Note on complexity: exact dedup of *n* distinct recipients needs Ω(n) space —
-> there is no O(log n)-memory trick (that's an information-theoretic floor). The
-> realistic wins are a smaller constant (bloom filter) or moving the *n* out of
-> the sender process (Dragonfly/Redis). A sorted structure gets O(log n) *time*
-> per lookup but still O(n) space.
-
-### Rate limiting — token bucket
-
-`golang.org/x/time/rate.Limiter` (`blast.go:114`) is a token bucket: refills at
-`Limit` tokens/sec, holds up to `Burst` at once. Every worker shares **one**
-limiter, so the aggregate send rate across all N goroutines is globally capped —
-the workers exist only to hide per-call latency, the limiter is the true throttle.
-`limiter.Wait(ctx)` blocks until a token is free or `ctx` is done. `Burst`
-defaults to `RatePerSec` (one second of slack); set `-rate 0` to remove the
-limiter entirely (throughput then bounded by `workers / latency`). This is why
-throughput is `min(rate, workers/latency)` capped by the ESP quota.
-
-### Retry & error classification
-
-`process()` (`blast.go`) renders once, then loops up to `MaxAttempts`. Errors are
-classified, not blindly retried:
-
-- **Retryable** (`isRetryable` → `errors.Is(err, sender.ErrRetryable)`): backends
-  wrap transient faults — SES throttling / 5xx, SMTP 4xx on `RCPT`, any dial or
-  network error — with `fmt.Errorf("%w: …", ErrRetryable)`. `errors.Is` unwraps
-  the chain, so nested wraps still classify correctly.
-- **Permanent** (bad address, SMTP 5xx, auth failure, a render error): straight to
-  DLQ, no retry — retrying can't fix them and would waste quota.
-
-Backoff is exponential: `200ms → 400ms → 800ms …` (`backoff *= 2`), each sleep
-`select`ing on `ctx`. On exhaustion or a permanent error the ID + cause append to
-the dead-letter file under a mutex.
-
-### Checkpoint durability & the duplicate window
-
-`checkpoint.log` is an append-only newline list of completed IDs, fronted by an
-in-memory `map[string]struct{}` for O(1) skip checks. On startup the file is
-loaded into the set (`Open`), giving resume. Writes go through a `bufio.Writer`.
-
-The subtle part is the **crash semantics**:
-
-- `bufio.Flush()` (called every 2s by the progress goroutine, `main.go:257`)
-  pushes buffered bytes into the OS. A `kill -9` of the *process* does **not** lose
-  flushed data — the page cache belongs to the kernel, not the process.
-- What a hard kill *can* lose is the bytes still sitting in the in-process `bufio`
-  buffer since the last flush. So the **duplicate window is bounded by the flush
-  interval**: at rate `R`, at most `~2s × R` recipients could be re-sent on resume.
-- That is deliberately at-least-once, not exactly-once — the idempotency key
-  (`Message-ID` / SES tag) lets a downstream layer dedup if it must. Full fsync
-  per record would make it tighter but throttle throughput to disk-sync speed;
-  the 2s window is the chosen trade. The benchmark's crash test hit this path and
-  resumed with **zero** duplicates because a flush had landed before the kill.
-
-### SMTP connection pooling — cost model
-
-Per-message SMTP cost without pooling is dominated by the handshake: TCP + STARTTLS
-(a TLS handshake ≈ 1–2 RTT) + AUTH — easily 100–300 ms before a single byte of
-mail. `SMTPSender` (`smtp.go`) keeps a buffered channel of live `*smtp.Client`;
-`getConn` pulls an idle one (handshake already paid) or dials, and after a
-successful `DATA` it issues `RSET` and returns the connection to the pool. So the
-handshake is amortized: `total ≈ handshake × pool_size + per_msg_txn × messages`
-instead of `(handshake + per_msg_txn) × messages`. A connection that errors is
-`Close()`d and dropped, never returned — one broken link can't poison the pool.
-Pool size defaults to `-workers` so every worker can hold a warm connection.
-
-### NATS JetStream — concrete multi-node design
-
-Swapping the in-process channel for NATS makes the pool horizontally scalable:
-
-- **Stream**: `EMAILS`, subject `emails.jobs.*`, `FileStorage`, retention
-  `WorkQueue` (a message is removed once acked — natural once-delivery within the
-  cluster).
-- **Producer**: the CSV reader publishes one message per recipient with header
-  `Nats-Msg-Id: <user.ID>`. JetStream's dedup window drops duplicate publishes,
-  so a producer retry can't double-enqueue.
-- **Consumers**: a **pull** consumer with `AckExplicit`, `MaxAckPending` ≈ the node's
-  worker count, and `AckWait` > worst-case send-time. Each node runs *this exact
-  pool*; workers `Fetch` a batch, send, then `msg.Ack()` — **`Ack` replaces
-  `checkpoint.Done`**. A node crash means unacked messages redeliver elsewhere
-  after `AckWait` (`MaxDeliver` caps attempts → terminal `msg.Term()` = DLQ).
-- **What changes**: only the producer (CSV → publish) and the sink
-  (`checkpoint.Done` → `msg.Ack`). The `Sender`, shared rate limiter, retry
-  classifier, and DLQ logic port **unchanged** — the rate limiter now throttles
-  per node, so set it to `quota / node_count`. [Watermill](https://watermill.io)'s
-  NATS JetStream Pub/Sub can own the publish/ack + retry/poison-queue wiring so
-  those two touch-points stay a few lines each.
-
-## Components
-
-| File | Role |
-|------|------|
-| `internal/source/csv.go` | Streams recipients lazily (1M rows never in RAM) |
-| `internal/render/render.go` | Parse-once subject (`text/template`) + body (`html/template`, auto-escaped), concurrent-safe |
-| `internal/blast/blast.go` | Worker pool, rate limiter, retry/backoff, DLQ |
-| `internal/checkpoint/checkpoint.go` | Resumable progress log (crash-safe) |
-| `internal/sender/sender.go` | `Sender` interface + `mock` backend (default) |
-| `internal/sender/smtp.go` | SMTP backend (**pooled** persistent conns) — your **VPS** / relay |
-| `internal/sender/ses.go` | Amazon SES v2 backend (build tag `ses`) |
-| `internal/sender/dryrun.go` | Wraps any backend — renders + counts, sends nothing |
-| `internal/config/dotenv.go` | Minimal `.env` loader (no dependency) |
-| `cmd/gencsv/` | Deterministic 1M-row test CSV generator |
-
-## Quick start (zero external services)
+Go 1.25+.
 
 ```bash
+# mock backend, sample CSV in the repo, logs every send
 go run . -in users.csv -backend mock -workers 200 -rate 500 -verbose
+
+# render and count against a real backend config, send nothing
+go run -tags ses . -in users.csv -backend ses -from "News <news@example.com>" -dryrun -verbose
 ```
 
-Input CSV needs `id` and `email` columns; every other column is a merge field:
-
-```csv
-id,email,first_name,plan
-u001,alice@example.com,Alice,Pro
-```
-
-Templates reference merge fields with Go template syntax:
+SMTP:
 
 ```bash
--subject "Hi {{.first_name}}, a note for you"
--body    "<p>Hello {{.first_name}}, your plan: {{.plan}}.</p>"
+go run . -in users.csv -backend smtp -from "News <news@example.com>" \
+  -smtp-host smtp.example.com -smtp-port 587 -smtp-user USER -smtp-pass PASS
 ```
 
-## Dry run — ALWAYS do this before a real 1M blast
+SES uses the standard AWS credential chain (`AWS_REGION`, env vars, or a profile) and needs the build tag: `go build -tags ses -o emailblast .`
 
-Renders every message and validates wiring, rate, and templates against the real
-list, but sends **nothing**:
+Every flag has an env var equivalent (`EMAIL_WORKERS`, `SMTP_HOST`, ...); see `.env.example`. A `.env` file is read if present, but variables already set in the environment win. `go run . -h` lists all flags.
+
+Docker:
 
 ```bash
-go run . -in users.csv -backend ses -from "News <news@you.com>" -dryrun -verbose
+cp .env.example .env
+mkdir -p data && cp users.csv data/
+docker compose up --build
 ```
-
-## Backends
-
-### mock (default)
-Logs sends. Zero deps. For load-testing the pipeline itself.
-
-### smtp — send through your own VPS
-```bash
-go run . -in users.csv -backend smtp \
-  -smtp-host mail.you.com -smtp-port 587 -smtp-tls \
-  -smtp-user USER -smtp-pass PASS -from news@you.com
-```
-App running **on** the VPS next to Postfix on :25 (no auth):
-```bash
-go run . -in users.csv -backend smtp -smtp-host localhost -smtp-port 25 \
-  -smtp-tls=false -from news@you.com -rate 100
-```
-
-**Connection pooling:** the SMTP backend keeps a bounded pool of persistent
-connections and issues `RSET` between messages, so one TCP+STARTTLS+AUTH
-handshake is amortized over many sends instead of paid per message — the single
-biggest SMTP throughput win. Pool defaults to `-workers`; tune with `-smtp-pool`.
-A connection that errors is dropped, never reused.
-
-> **If you use SMTP mail, respect the provider's send limit.** Every SMTP
-> service caps sends (per-second and often per-hour/day). Set `-rate` to that
-> limit — the shared rate limiter throttles all workers under it, so you won't
-> get blocked or throttled by the server:
-> ```bash
-> -backend smtp -rate 100     # provider allows 100 msg/s
-> ```
-> For a **per-second** cap this is all you need on one machine. For a **daily/
-> hourly** cap, or to spread across **multiple SMTP accounts/IPs** or **multiple
-> nodes**, put a durable queue in front (NATS JetStream — see
-> [Scale beyond one node](#scale-beyond-one-node)): it holds the backlog and each
-> consumer runs at `-rate = limit / node_count`.
-
-> **VPS deliverability reality:** a fresh VPS IP has zero reputation. Blast 1M
-> cold = instant spam-folder + blacklist. To self-host you MUST:
-> - **SPF + DKIM + DMARC** DNS records
-> - **reverse DNS (PTR)** matching your HELO hostname
-> - **warm the IP up** over days (ramp volume slowly)
-> - handle bounces / complaints, keep the list clean
->
-> Start rate low (`-rate 50`) and ramp. For 1M without owning deliverability,
-> a reputable ESP is usually the pragmatic call.
-
-### ses — Amazon SES (recommended for high volume)
-Cheapest (~$0.10/1k ≈ $100 for 1M) and highest throughput after a quota bump.
-Compiled behind a build tag so the default build stays dependency-free:
-
-```bash
-go build -tags ses -o emailblast .
-AWS_REGION=us-east-1 ./emailblast -in users.csv -backend ses \
-  -from "News <news@you.com>" -rate 500 -workers 300
-```
-Uses the standard AWS credential chain (env / shared config / IAM role).
-Request an SES **sending quota increase** first — that quota is your throughput.
-
-## Reliability features
-
-- **Resume after crash** — completed IDs go to `checkpoint.log`; a re-run skips
-  them. `-checkpoint ""` disables.
-- **Dead-letter** — permanently failed recipients + cause go to `dead-letter.log`.
-  Re-run against it later. `-dlq ""` disables.
-- **Retry w/ exponential backoff** — throttling/5xx/network retried up to
-  `-attempts` times; permanent errors (bad address) go straight to DLQ.
-- **Idempotency key** — user ID travels as SES tag / SMTP `Message-ID` so a
-  resend after crash is detectable downstream.
-- **Graceful shutdown** — Ctrl-C / SIGTERM lets in-flight sends finish and
-  flushes the checkpoint; re-run resumes cleanly.
-- **HTML-safe personalization** — the body is `html/template` (subject is
-  `text/template`), so a merge value like `O'Brien & <Sons>` is context-escaped,
-  not injected. Covered by a unit test.
-- **Email dedup** — the producer drops duplicate addresses (trim + lowercase)
-  within a run and reports the `deduped` count in the done log.
-- **List-Unsubscribe** — `-unsub-url` / `-unsub-mailto` add `List-Unsubscribe`
-  (+ `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, RFC 8058) to SMTP and
-  SES. Required by Gmail/Yahoo bulk-sender rules; the program warns if unset.
 
 ## Tests
 
 ```bash
 go test -race ./...
+go vet ./... && go vet -tags ses ./...
 ```
 
-Five focused suites: **render** (HTML escaping of `O'Brien & <Sons>`, missing
-keys), **retry classifier** (`errors.Is` unwrapping of retryable vs permanent),
-**rate limiter** (throughput is actually throttled), **checkpoint** (resume
-reload + flush-without-close durability), and **dry-run** (inner backend never
-called). Plus dedup and List-Unsubscribe header construction. CI runs
-build + vet + test on every push.
+13 tests across `render` (HTML escaping, missing keys), `blast` (retry then DLQ, retry classification, limiter actually throttles, producer dedup), `checkpoint` (resume reload, flush without close) and `sender` (dry-run never calls the inner backend, `List-Unsubscribe` header). CI runs vet, both builds and the race tests on every push.
 
-## Logging
+## Benchmark
 
-Structured logging via the stdlib `log/slog`. Two formats:
+This measures the pipeline, not email delivery: mock backend with 20ms simulated latency per send, no rate limit.
 
 ```bash
--log-format text   # human-friendly, default — key=value
--log-format json   # machine-parseable for Loki / CloudWatch / ELK aggregation
--log-level info    # debug | info | warn | error
+go build -o emailblast . && go build -o gencsv ./cmd/gencsv
+./gencsv -n 1000000 -out users_1m.csv
+/usr/bin/time -l ./emailblast -in users_1m.csv -workers 1000 -mock-delay 20ms -rate 0 -checkpoint cp.log
 ```
 
-`json` example (one object per line):
+Two runs on the same laptop (Intel i5-1038NG7, 16 GB, macOS, Go 1.25.5), both 1,000,000 sent and 0 failed:
 
-```json
-{"time":"2026-07-23T16:35:21Z","level":"INFO","msg":"progress","sent":420000,"skipped":0,"failed":12,"retries":37}
-{"time":"2026-07-23T16:35:21Z","level":"INFO","msg":"done","elapsed":"33m","sent":999988,"failed":12,"rate_per_sec":505}
-```
+| Run | Elapsed | Rate | Peak RSS |
+|---|---:|---:|---:|
+| original, in [`bench/results/benchmark_raw.txt`](bench/results/benchmark_raw.txt) | 21.0s | 47,711/s | 259 MB |
+| re-run while writing this README | 27.3s | 36,574/s | 278 MB |
 
-The stdlib `log.Printf` calls inside the internal packages are bridged through
-the same slog handler, so every line — operational events and incidental
-warnings alike — shares one format and one stream (stderr). Per-recipient
-failures are not logged individually at scale; they land in the dead-letter file
-instead. Progress is logged every 2s.
+Expect different numbers on other machines. With a real provider, the quota is the limit, not this.
 
-## Flags
+## Limitations and what I'd do next
 
-```
--in            input CSV (id,email + merge columns)      default users.csv
--backend       mock | smtp | ses                          default mock
--from          sender identity
--workers       concurrent send goroutines                 default 200
--rate          max sends/sec (ESP quota); 0 = unlimited   default 500
--attempts      max tries per recipient before DLQ         default 5
--checkpoint    resume file ("" disables)                  default checkpoint.log
--dlq           dead-letter file ("" disables)             default dead-letter.log
--dryrun        render + count, send NOTHING               default false
--subject       subject template
--body          HTML body template
--verbose       log every send
--smtp-host/-smtp-port/-smtp-user/-smtp-pass/-smtp-tls     SMTP backend
--smtp-pool     persistent connection pool size (0 = match -workers)
--unsub-url     List-Unsubscribe URL ({{email}} substituted; enables one-click)
--unsub-mailto  List-Unsubscribe mailto address
--log-format    text | json                                default text
--log-level     debug | info | warn | error                default info
--env           path to .env file                          default .env
--mock-delay/-mock-fail-every                              mock tuning
-```
+- **Checkpoint can be corrupted by `kill -9`.** If the process dies mid-write, the last line is half-written and the next run appends to it, so that ID is recorded wrong and would be sent again on a later resume. The fix is to truncate a trailing partial line in `checkpoint.Open`.
+- Memory grows with the number of unique recipients, because the dedup set and the checkpoint set are both in memory. Fine for a few million rows, not for much more.
+- Single node only. Spreading a run across machines would need a shared queue and a shared checkpoint store; none of that is built.
+- Bounces and complaints are not handled. SES/SMTP feedback has to go into a suppression list separately.
+- Malformed CSV rows are skipped silently, without being counted.
+- The module path is `emailblast`, so `go install github.com/bryanwahyu/emailblast@latest` does not work yet.
 
-## Throughput math
+## License
 
-At `-rate 500`, 1M emails ≈ **33 min**. Throughput is `min(rate, workers/latency)`
-and capped by your ESP quota — raise the quota, then raise `-rate`. Adding workers
-past `rate × latency` does nothing but queue.
-
-## Benchmark (measured)
-
-Real runs on the `mock` backend with a simulated 20ms per-send latency — **no
-real email sent**. Recipient list generated by `go run ./cmd/gencsv -n 1000000`.
-Raw evidence: [`bench/results/benchmark_raw.txt`](bench/results/benchmark_raw.txt).
-
-**Machine:** Intel Core i5-1038NG7 (4 cores / 8 threads), 16 GB RAM, macOS
-(darwin 25.5), Go 1.25.5.
-
-| Run | Recipients | Config | Elapsed | Rate | Peak RSS¹ | Result |
-|-----|-----------:|--------|--------:|-----:|---------:|--------|
-| **1 — full** | 1,000,000 | 1000 workers, 20ms latency, rate=0 | **21.0s** | **47,711/s** | ~259 MB | sent 1,000,000 / failed 0 |
-| **2a — crash** | (killed) | 500 workers, `kill -9` mid-run | — | — | — | checkpoint at 446,574 sent |
-| **2b — resume** | remainder | same checkpoint, rerun | 23.6s | 23,424/s | ~250 MB | skipped **446,574**, sent **553,426** → **1,000,000 total** |
-
-¹ Peak RSS is noisy (Go heap + GC timing, ±~10% run-to-run) — approximate. For the
-controlled memory-scaling numbers see the [memory note](#backpressure--memory) in
-Internals. Elapsed/rate are stable.
-
-**Two things this proves:**
-
-1. **The full CSV is never loaded into RAM** — rows are streamed; peak RSS was
-   ~250–270 MB for a 1M-row (45 MB) input. Note that memory still scales with
-   *unique recipients* (the dedup + checkpoint indexes are O(n) — see the memory
-   note in Internals), not with the raw file size.
-2. **Checkpoint resume is exact** — after a hard `kill -9`, the rerun skipped
-   *precisely* the 446,574 already sent and completed the remaining 553,426.
-   446,574 + 553,426 = 1,000,000, no loss, no duplicates.
-
-> Throughput here is gated by the artificial 20ms latency and worker count, not a
-> real ESP. On a real backend, `min(rate, workers/latency)` capped by your ESP
-> quota governs — raise the quota, then `-rate`.
-
-## Scale beyond one node
-
-Today it's single-node: the jobs channel lives in-process. To go multi-node
-(survive a machine dying mid-run, spread load across boxes), swap that channel
-for a distributed queue. **My pick is [NATS](https://nats.io) (JetStream):**
-
-- **Easy** — a single self-contained Go binary, no ZooKeeper/broker cluster to
-  babysit like Kafka. Trivial to run locally, in Docker, or as a small cluster;
-  minimal ops surface.
-- **Faster + lightweight** — millions of msgs/sec, sub-ms latency, tiny memory
-  footprint; fits the same "robust and fast" reasoning as the app itself.
-- **JetStream durability** — persistent streams + acks give at-least-once
-  delivery and redelivery on consumer crash, replacing the local checkpoint's
-  role for cross-machine work.
-- **Consumer groups** — many worker nodes pull from one stream and NATS balances
-  the work; each node runs this exact pool, just reading jobs from NATS instead
-  of the CSV producer.
-
-**Combine with [Watermill](https://watermill.io):** rather than wiring the NATS
-client by hand, use Watermill — a Go library for event-driven / message-stream
-apps with a first-class NATS JetStream Pub/Sub. It gives a broker-agnostic
-`Publisher`/`Subscriber` interface plus middleware (retry, poison queue,
-correlation IDs, metrics) out of the box. Concretely: the CSV producer becomes a
-Watermill `Publisher.Publish`, and each worker node is a Watermill handler whose
-body is our existing `Sender.Send` + rate limiter. Because Watermill abstracts
-the transport, the same code runs on NATS today and could move to Kafka/RabbitMQ
-later without touching the send pipeline — and its built-in retry/poison-queue
-middleware maps directly onto our retry + DLQ semantics.
-
-Only the producer (CSV → channel) and the sink (`checkpoint.Done`) change; the
-`Sender`, rate limiter, retry/backoff, and DLQ logic port unchanged.
-
-**Why NATS over the alternatives:**
-
-| Broker | Trade-off for this workload |
-|--------|------------------------------|
-| **NATS (JetStream)** | Single Go binary, low RAM, millions of msgs/sec, no external deps. **Chosen.** |
-| **SQS** | Fully managed, but **you pay per request** — at 1M+ messages (plus acks/retries) the per-API-call cost adds up, and it locks you to AWS. |
-| **Kafka** | Battle-tested at scale, but **heavy on RAM/ops** — JVM brokers + ZooKeeper/KRaft, page-cache hungry, real cluster to run and tune. Overkill for a send queue. |
-
-For a fire-and-drain send workload, NATS gives the durability we need without
-SQS's per-message bill or Kafka's memory + operational weight.
-
-## Build & test
-
-```bash
-go build ./...                 # default (mock + smtp), no external deps at runtime
-go build -tags ses ./...       # adds Amazon SES backend
-go vet ./...
-```
+MIT
